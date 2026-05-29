@@ -206,6 +206,94 @@ Para Windows:
 - Habilitar WinRM.
 - Migrar a `5986` con certificado interno.
 
+## Bootstrap Linux con credencial temporal - 2026-05-29
+
+Se ejecuto bootstrap desde `XTR-SRV-ANSI-CORE` hacia 174 VMs Linux activas detectadas en NetBox.
+
+Accion realizada en hosts donde fue posible autenticarse como `root`:
+
+- Crear/validar usuario `ansible_svc`.
+- Instalar llave publica de `/home/ansible_svc/.ssh/ansible_id.pub`.
+- Crear sudoers `/etc/sudoers.d/90-ansible_svc` con `NOPASSWD`.
+- Validar login por llave como `ansible_svc`.
+- Validar `sudo -n true`.
+- Ejecutar `ansible ping` con `become`.
+
+Resumen:
+
+| Estado | Cantidad |
+|---|---:|
+| Hosts candidatos Linux | 174 |
+| `TCP/22` cerrado/filtrado | 36 |
+| `TCP/22` abierto | 137 |
+| Local control node | 1 |
+| Password root correcto y bootstrap OK | 25 |
+| Password root rechazado | 112 |
+| Timeout autenticando root | 1 |
+| Relacion de confianza validada con Ansible ping | 25 |
+
+Logs en control node:
+
+```text
+/ansible/logs/ansible_trust_bootstrap_20260529-140015.csv
+/ansible/logs/ansible_trust_bootstrap_20260529-140015.json
+```
+
+Inventario temporal de hosts confiables:
+
+```text
+/ansible/projects/ansible-infra/generated/trusted_linux.ini
+```
+
+Comando de validacion usado:
+
+```bash
+ANSIBLE_HOST_KEY_CHECKING=False ansible \
+  -i /ansible/projects/ansible-infra/generated/trusted_linux.ini \
+  trusted_linux \
+  -m ping \
+  -u ansible_svc \
+  --private-key /home/ansible_svc/.ssh/ansible_id \
+  -b
+```
+
+Hosts con confianza validada:
+
+```text
+TVC-SRV-DBPANDORA              192.168.59.113
+TVC-SRV-DISTRECOMMERCE        192.168.59.127
+TVC-SRV-ELASTICSEARCH         192.168.59.25
+TVC-SRV-FRONTCERT             192.168.59.26
+TVC-SRV-ZAPPINGDEV            192.168.59.147
+TVC-SRV-ZAPPINGPRO            192.168.59.148
+XTR-SRV-ANSI-CORE             172.19.31.9
+XTR-SRV-BANKDEB               192.168.76.90
+XTR-SRV-BASTION-K8S           172.19.16.25
+XTR-SRV-BROKERPASM            192.168.59.10
+XTR-SRV-CPAPP-K8S             172.19.16.29
+XTR-SRV-DBINTRAXTR            192.168.76.50
+XTR-SRV-ETCDAPP-K8S           172.19.16.28
+XTR-SRV-MASTERNODDES          192.168.77.10
+XTR-SRV-MASTERNODTES          192.168.76.25
+XTR-SRV-N8NDBPRO              192.168.59.15
+XTR-SRV-N8NPRO                192.168.59.14
+XTR-SRV-REVERSOPROD           192.168.59.35
+XTR-SRV-SFTPGO                172.19.24.12
+XTR-SRV-STAGINGTES            192.168.76.10
+XTR-SRV-WORKERAPP-K8S         172.19.16.27
+XTR-SRV-WORKERNODDES          192.168.77.11
+XTR-SRV-WORKERNODTES          192.168.76.24
+XTR-SRV-ZBXDBPRO              192.168.59.37
+XTR-SRV-ZBXPRO                172.19.24.10
+```
+
+Pendientes:
+
+- 36 hosts requieren permiso/red `TCP/22` o revision de firewall local.
+- 112 hosts tienen `TCP/22` abierto, pero la credencial root temporal no aplica.
+- Varios RHEL 5/6 fallan por algoritmos SSH antiguos; requieren excepcion controlada (`HostKeyAlgorithms`/`PubkeyAcceptedAlgorithms`) o actualizacion SSH.
+- Para operar con host key checking estricto, limpiar/normalizar `known_hosts`; la validacion inicial se hizo con `ANSIBLE_HOST_KEY_CHECKING=False`.
+
 ## Validacion desde estacion Ronny - 2026-05-29
 
 Estas pruebas fueron hechas desde la estacion de administracion, no desde `XTR-SRV-ANSI-CORE`.
