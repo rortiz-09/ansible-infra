@@ -421,3 +421,47 @@ Pendiente Windows:
 - Construir fase Windows con credenciales administrativas de Passbolt.
 - Validar primero alcance por `TCP/5985`.
 - Migrar a `TCP/5986` cuando los certificados internos de `XTRIM-Root-CA` esten desplegados.
+
+## Validacion Windows con Passbolt - 2026-05-29
+
+Se instalo `pywinrm` en `XTR-SRV-ANSI-CORE` para permitir pruebas WinRM desde Ansible.
+
+La primera fase fue solo de lectura:
+
+- Tomar del export de Passbolt candidatos con login administrativo (`Administrator`, `Administrador` o `admin`).
+- Emparejar solo por IP exacta o nombre exacto normalizado.
+- Probar `TCP/5985`.
+- Ejecutar `hostname` via WinRM cuando la autenticacion fuera aceptada.
+- No se aplicaron cambios en Windows.
+
+Resumen:
+
+| Metrica | Cantidad |
+|---|---:|
+| Entradas Passbolt administrativas | 211 |
+| Targets Windows emparejados | 37 |
+| `TCP/5985` abierto | 34 |
+| `TCP/5985` cerrado/filtrado | 3 |
+| Autenticacion WinRM OK | 3 |
+| Credenciales rechazadas | 31 |
+
+Hosts Windows con autenticacion WinRM validada:
+
+```text
+tvc-srv-backupAS2          192.168.21.34
+XTR-SRV-DES-INVICMIGRA     192.168.77.98
+xtr-srv-invic-migra        192.168.21.43
+```
+
+Log:
+
+```text
+/ansible/logs/ansible_passbolt_windows_validate_20260529-142818.json
+```
+
+Lectura operativa:
+
+- La red hacia Windows por `5985` funciona para la mayoria de los candidatos probados.
+- El bloqueo principal no es red, sino credenciales rechazadas.
+- Para relacion de confianza Windows masiva conviene una cuenta de dominio/servicio para Ansible y WinRM HTTPS `5986`.
+- No se recomienda crear usuarios locales masivos en Windows hasta acordar el modelo: dominio, grupo local, GPO y certificado.
