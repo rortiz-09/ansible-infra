@@ -80,6 +80,13 @@ Cuando se valide un grupo pequeno, se puede escalar por ambiente:
 ansible-playbook playbooks/linux/bootstrap_ssh_keys.yml --limit env_prod
 ```
 
+Estado actual del bootstrap:
+
+- 80 servidores Linux quedaron con relacion de confianza completa: llave `ansible_svc` + `sudo` validado.
+- 3 servidores Linux aceptan la llave, pero requieren correccion de `sudo`.
+- Los inventarios operativos se generan en el control node bajo `generated/` y no se versionan porque son salida de ejecucion.
+- El detalle de logs, bloqueos y pendientes esta en `docs/REDES_ESTADO_PERMISOS.md`.
+
 ## Puertos
 
 La matriz inicial esta en:

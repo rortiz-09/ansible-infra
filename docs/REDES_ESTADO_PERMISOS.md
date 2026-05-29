@@ -323,3 +323,101 @@ Comando recomendado cuando exista acceso:
 cd /ansible
 ansible-playbook playbooks/connectivity/check_required_ports.yml
 ```
+
+## Bootstrap Linux con Passbolt - 2026-05-29
+
+Se ejecuto una segunda fase usando el export de Passbolt, tomando solo registros cuyo `Login Name` es exactamente `root`.
+No se usaron entradas tipo `root*`, aliases o usuarios derivados.
+
+Criterio aplicado:
+
+- Se excluyeron los hosts que ya tenian relacion de confianza validada.
+- Se emparejo credencial contra VM solo por IP exacta o nombre exacto normalizado.
+- Se evitaron coincidencias difusas para no aplicar credenciales sobre servidores incorrectos.
+- El archivo temporal con passwords se subio solo a `/root/.ansible_passbolt_linux_bootstrap.json` y se elimino al terminar la ejecucion.
+
+Resumen de carga:
+
+| Metrica | Cantidad |
+|---|---:|
+| VMs leidas desde NetBox | 360 |
+| Hosts Linux ya confiables excluidos | 25 |
+| Entradas Passbolt con login exacto `root` | 301 |
+| Targets Linux restantes emparejados | 116 |
+| Coincidencias por IP exacta | 138 |
+| Coincidencias por nombre exacto | 3 |
+
+Resultado:
+
+| Estado | Cantidad |
+|---|---:|
+| Targets evaluados | 116 |
+| `TCP/22` abierto | 99 |
+| `TCP/22` cerrado/filtrado | 17 |
+| Autenticacion root OK y llave instalada | 58 |
+| Autenticacion root fallida | 41 |
+| Relacion de confianza por llave OK | 58 |
+| Hosts con llave y sudo OK | 55 |
+| Hosts con llave OK pero sudo fallido | 3 |
+
+Inventarios generados en el control node:
+
+```text
+/ansible/projects/ansible-infra/generated/trusted_linux.ini
+/ansible/projects/ansible-infra/generated/trusted_linux_all.ini
+/ansible/projects/ansible-infra/generated/trusted_linux_no_sudo.ini
+```
+
+Estado consolidado:
+
+| Inventario | Cantidad | Uso |
+|---|---:|---|
+| `trusted_linux.ini` | 80 | Linux con llave y sudo OK para operacion Ansible con `become` |
+| `trusted_linux_all.ini` | 83 | Linux con llave validada, incluyendo hosts sin sudo |
+| `trusted_linux_no_sudo.ini` | 3 | Revision puntual de sudoers |
+
+Hosts con llave instalada pero sin sudo funcional:
+
+```text
+tvc-srv-agdi       192.168.21.243
+tvc-srv-gruptvc    192.168.21.123
+tvc-srv-xtvcable   192.168.21.129
+```
+
+Validacion ejecutada:
+
+```bash
+ANSIBLE_STDOUT_CALLBACK=default ANSIBLE_HOST_KEY_CHECKING=False ansible \
+  -i /ansible/projects/ansible-infra/generated/trusted_linux.ini \
+  trusted_linux \
+  -m ping \
+  -u ansible_svc \
+  --private-key /home/ansible_svc/.ssh/ansible_id \
+  -b
+```
+
+Resultado:
+
+```text
+PING_RC=0
+```
+
+Logs en el control node:
+
+```text
+/ansible/logs/ansible_passbolt_linux_bootstrap_20260529-142037.csv
+/ansible/logs/ansible_passbolt_linux_bootstrap_20260529-142037.json
+```
+
+Pendientes Linux:
+
+- Revisar 17 hosts con `TCP/22` cerrado/filtrado desde `XTR-SRV-ANSI-CORE`.
+- Revisar 41 hosts donde la credencial root de Passbolt no autentica.
+- Revisar servidores antiguos que fallan con `error in libcrypto`; probablemente requieren excepcion SSH legacy o actualizacion del servicio SSH.
+- Corregir sudoers en los 3 hosts que ya aceptan llave pero no permiten `sudo -n true`.
+
+Pendiente Windows:
+
+- Construir fase Windows con credenciales administrativas de Passbolt.
+- Validar primero alcance por `TCP/5985`.
+- Migrar a `TCP/5986` cuando los certificados internos de `XTRIM-Root-CA` esten desplegados.
