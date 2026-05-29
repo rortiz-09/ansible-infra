@@ -1,0 +1,6 @@
+﻿XTRIM Ansible Infrastructure Automation
+Original operations design and automation ownership: XTRIM / Ronny Ortiz TI.
+
+This project documents and automates infrastructure operations around NetBox,
+Zabbix, vCenter, AWS, Windows, Linux and internal certificates. Reuse of this
+repository or derivative work must preserve attribution to the original source.

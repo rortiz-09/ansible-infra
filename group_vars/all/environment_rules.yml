@@ -1,0 +1,13 @@
+---
+# Reglas configurables para agrupar por ambiente cuando NetBox no tenga tag/custom field.
+# Completar con rangos reales. No asumir ambiente solo por IP sin validar.
+
+environment_ip_rules:
+  prod: []
+  desa: []
+  test: []
+
+site_ip_rules:
+  gye: []
+  uio: []
+  cloud: []

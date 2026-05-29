@@ -1,0 +1,49 @@
+---
+# Matriz base de puertos requeridos para orquestacion.
+# Ajustar origen/destino con redes reales antes de solicitar reglas a Redes/Seguridad.
+
+control_node_ip: 172.19.31.9
+
+required_ports:
+  control_to_netbox:
+    - { proto: tcp, port: 443, purpose: "NetBox API / inventario dinamico / fuente de verdad" }
+  control_to_zabbix:
+    - { proto: tcp, port: 443, purpose: "Zabbix API" }
+    - { proto: tcp, port: 10050, purpose: "Zabbix agent checks si se validan desde control node" }
+    - { proto: tcp, port: 10051, purpose: "Zabbix server/proxy trapper si aplica" }
+  control_to_linux:
+    - { proto: tcp, port: 22, purpose: "SSH Ansible" }
+  control_to_windows:
+    - { proto: tcp, port: 5986, purpose: "WinRM HTTPS recomendado" }
+    - { proto: tcp, port: 5985, purpose: "WinRM HTTP temporal/bootstrap" }
+    - { proto: tcp, port: 445, purpose: "SMB opcional para copias/admin Windows" }
+    - { proto: tcp, port: 135, purpose: "RPC opcional administracion Windows" }
+    - { proto: tcp, port: "49152-65535", purpose: "RPC dinamico opcional si se usa administracion clasica" }
+  control_to_vcenter:
+    - { proto: tcp, port: 443, purpose: "vCenter API / pyvmomi" }
+  control_to_fortianalyzer:
+    - { proto: tcp, port: 443, purpose: "FortiAnalyzer JSON-RPC/API y consulta de logs" }
+  control_to_dns_ad:
+    - { proto: tcp, port: 53, purpose: "DNS TCP" }
+    - { proto: udp, port: 53, purpose: "DNS UDP" }
+    - { proto: tcp, port: 88, purpose: "Kerberos TCP" }
+    - { proto: udp, port: 88, purpose: "Kerberos UDP" }
+    - { proto: tcp, port: 389, purpose: "LDAP" }
+    - { proto: tcp, port: 636, purpose: "LDAPS" }
+    - { proto: tcp, port: 3268, purpose: "Global Catalog" }
+    - { proto: tcp, port: 3269, purpose: "Global Catalog SSL" }
+    - { proto: tcp, port: 123, purpose: "NTP TCP si aplica" }
+    - { proto: udp, port: 123, purpose: "NTP UDP" }
+  control_to_adcs:
+    - { proto: tcp, port: 80, purpose: "CRL/AIA HTTP si se publica por web" }
+    - { proto: tcp, port: 443, purpose: "AD CS web enrollment/API si se habilita HTTPS" }
+    - { proto: tcp, port: 135, purpose: "RPC DCOM CertSrv si se emite remoto por RPC" }
+    - { proto: tcp, port: "49152-65535", purpose: "RPC dinamico para AD CS remoto" }
+  control_to_cloud:
+    - { proto: tcp, port: 443, purpose: "AWS APIs, STS, SSO, Galaxy, PyPI, repos" }
+  managed_to_zabbix:
+    - { proto: tcp, port: 10050, purpose: "Zabbix agent passive desde server/proxy" }
+    - { proto: tcp, port: 10051, purpose: "Zabbix active agent hacia server/proxy" }
+  managed_to_adcs_crl:
+    - { proto: tcp, port: 80, purpose: "Descarga CRL/AIA HTTP si se publica" }
+    - { proto: tcp, port: 389, purpose: "CRL LDAP para clientes dominio" }

@@ -1,0 +1,23 @@
+# Secrets and local environment
+.env
+.env.local
+*.vault.yml
+*.key
+*.pem
+*.pfx
+*.p12
+secrets/
+
+# Generated exports and runtime logs
+generated/
+logs/
+*.retry
+
+# Python/cache
+__pycache__/
+*.pyc
+.venv/
+
+# Ansible local artifacts
+collections/
+roles/external/

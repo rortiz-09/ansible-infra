@@ -1,0 +1,18 @@
+---
+- name: Validate Zabbix agent reachability on managed hosts
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Check agent port from control node to target
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host | default(inventory_hostname) }}"
+        port: 10050
+        timeout: 5
+        state: started
+      delegate_to: localhost
+      register: zbx_agent_port
+      ignore_errors: true
+
+    - name: Report agent status
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} agent 10050 => {{ 'OK' if not zbx_agent_port.failed else 'BLOCKED/NOT_LISTENING' }}"

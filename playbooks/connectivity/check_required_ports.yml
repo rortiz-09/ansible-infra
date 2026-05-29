@@ -1,0 +1,27 @@
+---
+- name: Validate required orchestration ports from control node
+  hosts: localhost
+  gather_facts: false
+  vars:
+    port_targets:
+      - { name: netbox_api, host: "172.19.24.9", port: 443 }
+      - { name: zabbix_api, host: "172.19.24.10", port: 443 }
+      - { name: fortianalyzer_api, host: "192.168.59.41", port: 443 }
+      - { name: aws_sts, host: "sts.amazonaws.com", port: 443 }
+      - { name: galaxy, host: "galaxy.ansible.com", port: 443 }
+      - { name: pypi, host: "pypi.org", port: 443 }
+  tasks:
+    - name: Check TCP reachability
+      ansible.builtin.wait_for:
+        host: "{{ item.host }}"
+        port: "{{ item.port }}"
+        timeout: 5
+        state: started
+      loop: "{{ port_targets }}"
+      register: port_check
+      ignore_errors: true
+
+    - name: Show summary
+      ansible.builtin.debug:
+        msg: "{{ item.item.name }} {{ item.item.host }}:{{ item.item.port }} => {{ 'OK' if not item.failed else 'BLOCKED/FAILED' }}"
+      loop: "{{ port_check.results }}"

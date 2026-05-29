@@ -1,0 +1,20 @@
+---
+- name: Validate required NetBox inventory attributes
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Validate host has connection address
+      ansible.builtin.assert:
+        that:
+          - ansible_host is defined
+          - ansible_host | length > 0
+        fail_msg: "Host has no ansible_host/primary IP from NetBox."
+
+    - name: Show inventory metadata
+      ansible.builtin.debug:
+        msg:
+          host: "{{ inventory_hostname }}"
+          ansible_host: "{{ ansible_host | default('missing') }}"
+          platform: "{{ platform | default('missing') }}"
+          site: "{{ site | default('missing') }}"
+          environment: "{{ ambiente | default(environment | default('missing')) }}"

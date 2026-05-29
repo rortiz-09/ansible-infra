@@ -1,0 +1,47 @@
+---
+- name: Install Ansible service SSH key on Linux targets
+  hosts: linux
+  gather_facts: false
+  become: true
+  serial: 20
+  vars:
+    target_user: "{{ ansible_service_user | default('ansible_svc') }}"
+  pre_tasks:
+    - name: Require explicit limit to avoid accidental universe-wide rollout
+      ansible.builtin.assert:
+        that:
+          - ansible_limit is defined
+          - ansible_limit | length > 0
+        fail_msg: "Run with --limit first, for example --limit linux_prod or --limit one_host."
+
+    - name: Resolve public key content
+      ansible.builtin.set_fact:
+        resolved_public_key: >-
+          {{ ansible_service_public_key
+             if (ansible_service_public_key | default('') | length > 0)
+             else lookup('file', ansible_service_public_key_file | default('/home/ansible_svc/.ssh/ansible_id.pub')) }}
+
+  tasks:
+    - name: Ensure service user exists
+      ansible.builtin.user:
+        name: "{{ target_user }}"
+        shell: /bin/bash
+        create_home: true
+        state: present
+
+    - name: Install public SSH key
+      ansible.posix.authorized_key:
+        user: "{{ target_user }}"
+        key: "{{ resolved_public_key }}"
+        state: present
+        manage_dir: true
+
+    - name: Ensure sudoers drop-in for service user when enabled
+      ansible.builtin.copy:
+        dest: "/etc/sudoers.d/90-{{ target_user }}"
+        owner: root
+        group: root
+        mode: '0440'
+        content: "{{ target_user }} ALL=(ALL) NOPASSWD:ALL\n"
+        validate: /usr/sbin/visudo -cf %s
+      when: bootstrap_enable_passwordless_sudo | default(false) | bool

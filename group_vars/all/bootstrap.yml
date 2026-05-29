@@ -1,0 +1,5 @@
+---
+ansible_service_user: ansible_svc
+ansible_service_public_key_file: /home/ansible_svc/.ssh/ansible_id.pub
+# Pegar aqui la llave publica SOLO si se ejecuta desde otro control node.
+ansible_service_public_key: ""

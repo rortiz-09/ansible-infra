@@ -1,0 +1,14 @@
+---
+- name: Prepare Windows hosts for Ansible over WinRM HTTPS
+  hosts: windows
+  gather_facts: false
+  serial: 10
+  tasks:
+    - name: Placeholder - validate WinRM reachability
+      ansible.windows.win_ping:
+
+# Pendiente:
+# - Emitir certificado de equipo desde XTRIM-Root-CA.
+# - Crear listener WinRM HTTPS 5986.
+# - Abrir firewall local 5986.
+# - Configurar autenticacion Kerberos/NTLM segun politica.
