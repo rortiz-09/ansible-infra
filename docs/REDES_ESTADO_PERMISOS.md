@@ -105,3 +105,33 @@ No guardar communities SNMP en Git. Usar Ansible Vault o secret manager.
 2. Agregar targets representativos Linux/Windows por ambiente.
 3. Confirmar si `TCP/22`, `UDP/161` y `UDP/162` estan realmente aplicados en firewall.
 4. Si NetBox `443` abre, correr inventario dinamico y validar grupos reales.
+
+## Validacion desde estacion Ronny - 2026-05-29
+
+Estas pruebas fueron hechas desde la estacion de administracion, no desde `XTR-SRV-ANSI-CORE`.
+Sirven como referencia, pero la validacion definitiva debe ejecutarse desde el control node.
+
+| Destino | Puerto | Resultado |
+|---|---:|---|
+| Ansible `172.19.31.9` | TCP/22 | Abierto |
+| Ansible `172.19.31.9` | TCP/443 | Timeout/no publicado |
+| NetBox `172.19.24.9` | TCP/443 | Abierto |
+| Zabbix `172.19.24.10` | TCP/443 | Abierto |
+| FortiAnalyzer `192.168.59.41` | TCP/443 | Abierto |
+| AWS STS `sts.amazonaws.com` | TCP/443 | Abierto |
+| Galaxy `galaxy.ansible.com` | TCP/443 | Abierto |
+| PyPI `pypi.org` | TCP/443 | Abierto |
+
+SSH hacia `172.19.31.9` responde, pero no existe autenticacion por llave desde la estacion para `root` ni `ansible_svc`.
+Para ejecutar validaciones reales desde el control node hace falta una de estas acciones:
+
+- Registrar la llave publica de la estacion en `authorized_keys` de `root` o `ansible_svc`.
+- Usar una credencial temporal y luego dejar acceso por llave.
+- Ejecutar manualmente el playbook desde una sesion directa al servidor Ansible.
+
+Comando recomendado cuando exista acceso:
+
+```bash
+cd /ansible
+ansible-playbook playbooks/connectivity/check_required_ports.yml
+```

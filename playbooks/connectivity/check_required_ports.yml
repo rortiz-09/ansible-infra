@@ -10,6 +10,11 @@
       - { name: aws_sts, host: "sts.amazonaws.com", port: 443 }
       - { name: galaxy, host: "galaxy.ansible.com", port: 443 }
       - { name: pypi, host: "pypi.org", port: 443 }
+    # Add representative hosts per network before running from XTR-SRV-ANSI-CORE.
+    # These lists should contain one safe target per segment/site/environment.
+    linux_targets: []
+    windows_targets: []
+    app_targets: []
   tasks:
     - name: Check TCP reachability
       ansible.builtin.wait_for:
@@ -25,3 +30,48 @@
       ansible.builtin.debug:
         msg: "{{ item.item.name }} {{ item.item.host }}:{{ item.item.port }} => {{ 'OK' if not item.failed else 'BLOCKED/FAILED' }}"
       loop: "{{ port_check.results }}"
+
+    - name: Check SSH on representative Linux targets
+      ansible.builtin.wait_for:
+        host: "{{ item }}"
+        port: 22
+        timeout: 5
+        state: started
+      loop: "{{ linux_targets }}"
+      register: linux_ssh_check
+      ignore_errors: true
+
+    - name: Check WinRM on representative Windows targets
+      ansible.builtin.wait_for:
+        host: "{{ item.0 }}"
+        port: "{{ item.1 }}"
+        timeout: 5
+        state: started
+      loop: "{{ windows_targets | product([5985, 5986]) | list }}"
+      register: windows_winrm_check
+      ignore_errors: true
+
+    - name: Check application ports confirmed by network policy
+      ansible.builtin.wait_for:
+        host: "{{ item.0 }}"
+        port: "{{ item.1 }}"
+        timeout: 5
+        state: started
+      loop: "{{ app_targets | product([3000, 8081, 9090]) | list }}"
+      register: app_port_check
+      ignore_errors: true
+
+    - name: Show Linux SSH summary
+      ansible.builtin.debug:
+        msg: "{{ item.item }}:22 => {{ 'OK' if not item.failed else 'BLOCKED/FAILED' }}"
+      loop: "{{ linux_ssh_check.results | default([]) }}"
+
+    - name: Show Windows WinRM summary
+      ansible.builtin.debug:
+        msg: "{{ item.item.0 }}:{{ item.item.1 }} => {{ 'OK' if not item.failed else 'BLOCKED/FAILED' }}"
+      loop: "{{ windows_winrm_check.results | default([]) }}"
+
+    - name: Show application port summary
+      ansible.builtin.debug:
+        msg: "{{ item.item.0 }}:{{ item.item.1 }} => {{ 'OK' if not item.failed else 'BLOCKED/FAILED' }}"
+      loop: "{{ app_port_check.results | default([]) }}"
