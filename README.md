@@ -90,6 +90,21 @@ docs/PUERTOS_ORQUESTACION.md
 
 Incluye NetBox, Zabbix, Linux SSH, Windows WinRM, vCenter, FortiAnalyzer, DNS/AD, AD CS, AWS/Galaxy/PyPI y puertos Zabbix agent.
 
+El estado confirmado por Redes y las pruebas pendientes se documentan en:
+
+```text
+docs/REDES_ESTADO_PERMISOS.md
+```
+
+## Como leer los archivos del proyecto
+
+- `*.yml`: definiciones declarativas de Ansible. Aqui se describe que validar o cambiar.
+- `inventories/netbox_inventory.py`: inventario dinamico temporal que consulta NetBox y genera hosts/grupos.
+- `ansible.cfg`: configuracion local para que Ansible use este proyecto.
+- `docs/`: memoria operativa para explicar decisiones, puertos y procedimientos.
+
+Ansible usa YAML para playbooks y variables. El archivo Python existe porque NetBox es una fuente dinamica; mas adelante puede evolucionar a un inventory plugin, que es el enfoque recomendado por Ansible para versiones modernas.
+
 ## Terraform
 
 No es necesario levantar otro servidor solo para Terraform en la primera fase. Ansible puede operar configuracion, validaciones, agentes, certificados y reportes. Terraform conviene incorporarlo cuando se quiera aprovisionar infraestructura nueva de forma declarativa, especialmente en AWS o vSphere. Puede vivir inicialmente en este mismo repositorio bajo una carpeta `terraform/`, con backend remoto y aprobaciones cuando el proceso madure.
