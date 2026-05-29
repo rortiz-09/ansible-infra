@@ -82,8 +82,8 @@ ansible-playbook playbooks/linux/bootstrap_ssh_keys.yml --limit env_prod
 
 Estado actual del bootstrap:
 
-- 80 servidores Linux quedaron con relacion de confianza completa: llave `ansible_svc` + `sudo` validado.
-- 3 servidores Linux aceptan la llave, pero requieren correccion de `sudo`.
+- 99 servidores Linux quedaron con relacion de confianza completa: llave `ansible_svc` + `sudo` validado.
+- La ultima validacion `ansible ping` con `become` termino con `PING_RC=0`.
 - Windows quedo en fase de validacion: 3 servidores aceptan WinRM con credenciales administrativas; la mayoria rechaza credenciales aunque `5985` esta abierto.
 - Los inventarios operativos se generan en el control node bajo `generated/` y no se versionan porque son salida de ejecucion.
 - El detalle de logs, bloqueos y pendientes esta en `docs/REDES_ESTADO_PERMISOS.md`.

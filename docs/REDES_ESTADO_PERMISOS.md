@@ -465,3 +465,113 @@ Lectura operativa:
 - El bloqueo principal no es red, sino credenciales rechazadas.
 - Para relacion de confianza Windows masiva conviene una cuenta de dominio/servicio para Ansible y WinRM HTTPS `5986`.
 - No se recomienda crear usuarios locales masivos en Windows hasta acordar el modelo: dominio, grupo local, GPO y certificado.
+
+## Bootstrap Linux con usuarios privilegiados Passbolt - 2026-05-29
+
+Se ejecuto una tercera fase para Linux restantes usando credenciales privilegiadas del export de Passbolt.
+
+Criterio aplicado:
+
+- Se excluyeron los hosts que ya tenian `ansible_svc` + llave + `sudo` validado.
+- Se usaron solo credenciales emparejadas por IP exacta o nombre exacto normalizado.
+- Se probaron usuarios con patron privilegiado: `root`, `root-*`, `root_*`, `ansible`, `admin`, `sysadmin`, `tiadmin`, `hostadmin`, `clusteradmin`, `appadmin`, `dev-admin`, `desa-admin`, `dea-admin`, `oda-admin`, `sharedadmin`.
+- Para usuarios no-root, la llave solo se instala si el usuario puede elevar a root con `sudo`.
+- No se guardaron passwords en Git. Los archivos temporales con secretos se eliminaron al terminar.
+
+Resumen de ejecucion:
+
+| Metrica | Cantidad |
+|---|---:|
+| VMs leidas desde NetBox | 360 |
+| Linux ya confiables con sudo excluidos | 80 |
+| Entradas privilegiadas de Passbolt evaluables | 544 |
+| Targets Linux restantes emparejados | 70 |
+| `TCP/22` abierto | 48 |
+| `TCP/22` cerrado/filtrado | 22 |
+| Autenticacion privilegiada OK | 19 |
+| Bootstrap OK | 19 |
+| Llave + sudo OK en primera validacion | 16 |
+| Llave OK pero sudo bloqueado por `requiretty` | 3 |
+
+Hosts agregados en esta fase:
+
+```text
+TVC-SRV-CLUSTER1                   192.168.59.43
+TVC-SRV-COLSOC                     192.168.59.119
+TVC-SRV-DBALL1                     192.168.59.206
+TVC-SRV-DBALL2                     192.168.59.207
+TVC-SRV-DBING                      192.168.59.55
+TVC-SRV-FRONTEND                   192.168.59.87
+TVC-SRV-MALWAREGYE                 192.168.59.20
+tvc-srv-malwareuio                 192.168.21.73
+TVC-SRV-MOODLE                     192.168.59.3
+TVC-SRV-NESSUS                     192.168.59.59
+TVC-SRV-TVGUIA                     192.168.59.175
+xtr-srv-ansible-controller-control 192.168.21.12
+XTR-SRV-GYELDASH01                 192.168.77.24
+XTR-SRV-GYELIPAM01                 192.168.77.25
+XTR-SRV-PLAYOPSTES                 192.168.76.15
+XTR-SRV-ZBPRUEBA                   192.168.77.6
+tvc-srv-agdi                       192.168.21.243
+tvc-srv-gruptvc                    192.168.21.123
+tvc-srv-xtvcable                   192.168.21.129
+```
+
+Los tres ultimos tenian `sudo: sorry, you must have a tty to run sudo`.
+Se corrigio puntualmente agregando en `/etc/sudoers.d/90-ansible_svc`:
+
+```text
+Defaults:ansible_svc !requiretty
+ansible_svc ALL=(ALL) NOPASSWD:ALL
+```
+
+Validacion consolidada:
+
+| Estado | Cantidad |
+|---|---:|
+| Linux con relacion de confianza y sudo validado | 99 |
+| `ansible ping` con `become` | OK |
+| Codigo final | `PING_RC=0` |
+
+Logs:
+
+```text
+/ansible/logs/ansible_passbolt_privileged_linux_20260529-144144.csv
+/ansible/logs/ansible_passbolt_privileged_linux_20260529-144144.json
+/tmp/ansible_ping_sudo_after_requiretty.txt
+```
+
+Pendientes para completar universo Linux:
+
+| Bloqueo | Cantidad | Accion requerida |
+|---|---:|---|
+| `TCP/22` cerrado/filtrado desde Ansible | 36 | Redes/firewall debe permitir SSH desde `172.19.31.9` o validar firewall local |
+| Credenciales rechazadas | 43 | Actualizar Passbolt o entregar cuenta privilegiada correcta |
+| Sin credencial emparejada util | 1 | Registrar credencial correcta o ajustar inventario |
+
+Estado global Linux:
+
+| Metrica | Cantidad |
+|---|---:|
+| Linux activos/staged detectados en NetBox | 176 |
+| Linux con confianza + sudo | 99 |
+| Linux pendientes | 80 |
+
+## Recomendacion para relacion de confianza Windows
+
+Para llevar Windows a todo el universo no conviene depender de contrasenas locales en Passbolt host por host.
+El modelo recomendado es:
+
+1. Crear una cuenta de dominio de servicio para Ansible, por ejemplo `svc_ansible_win`.
+2. Crear un grupo AD, por ejemplo `GRP_ANSIBLE_WINRM_ADMIN`.
+3. Agregar la cuenta de servicio a ese grupo.
+4. Por GPO, agregar `GRP_ANSIBLE_WINRM_ADMIN` al grupo local `Administrators` de los servidores Windows administrados.
+5. Habilitar WinRM por GPO.
+6. En fase inicial se puede validar por `TCP/5985`; para operacion segura usar `TCP/5986`.
+7. Emitir certificados internos desde `XTRIM-Root-CA` para WinRM HTTPS.
+8. Abrir desde `XTR-SRV-ANSI-CORE` hacia Windows `TCP/5985` temporal/controlado y `TCP/5986` definitivo/recomendado.
+9. Crear inventario Windows en Ansible con `ansible_connection=winrm`.
+10. Validar con `ansible.windows.win_ping`.
+
+Ya se instalo `pywinrm` en `XTR-SRV-ANSI-CORE`.
+La prueba con Passbolt mostro que la red por `5985` funciona para buena parte de los hosts, pero el bloqueo principal es autenticacion.
