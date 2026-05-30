@@ -1,0 +1,59 @@
+---
+- name: Aplicar parches de seguridad Linux por lotes controlados
+  hosts: linux
+  gather_facts: true
+  become: true
+  serial: "{{ patch_serial | default(10) }}"
+  vars:
+    allow_security_patch: false
+    reboot_after_patch: false
+
+  pre_tasks:
+    - name: Exigir limite explicito
+      ansible.builtin.assert:
+        that:
+          - ansible_limit is defined
+          - ansible_limit | length > 0
+        fail_msg: "Ejecuta con --limit, por ejemplo --limit linux_prod_gye o --limit one_host."
+
+    - name: Exigir variable explicita de aprobacion
+      ansible.builtin.assert:
+        that:
+          - allow_security_patch | bool
+        fail_msg: "Define -e allow_security_patch=true despues de confirmar snapshot y ventana."
+
+  tasks:
+    - name: Mostrar sistema operativo y kernel antes del parcheo
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} antes del parcheo: {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }} kernel={{ ansible_facts.kernel }}"
+
+    - name: Aplicar actualizaciones de seguridad en familia RedHat
+      ansible.builtin.dnf:
+        name: "*"
+        state: latest
+        security: true
+        update_only: true
+      when: ansible_facts.os_family == "RedHat"
+
+    - name: Verificar requerimiento de reinicio en familia RedHat
+      ansible.builtin.command: needs-restarting -r
+      register: reboot_required_redhat
+      changed_when: false
+      failed_when: false
+      when: ansible_facts.os_family == "RedHat"
+
+    - name: Reiniciar host solo cuando este explicitamente habilitado y requerido
+      ansible.builtin.reboot:
+        reboot_timeout: 900
+        connect_timeout: 20
+        post_reboot_delay: 30
+        test_command: whoami
+      when:
+        - reboot_after_patch | bool
+        - (reboot_required_redhat.rc | default(0)) == 1
+
+    - name: Reportar requerimiento de reinicio
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} reboot_required={{ (reboot_required_redhat.rc | default(0)) == 1 }}
+          reboot_executed={{ reboot_after_patch | bool and (reboot_required_redhat.rc | default(0)) == 1 }}

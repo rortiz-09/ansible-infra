@@ -1,0 +1,97 @@
+---
+- name: Auditoria base de servidores Linux
+  hosts: linux
+  gather_facts: true
+  become: true
+  serial: 50
+  vars:
+    critical_services:
+      - sshd
+      - chronyd
+      - zabbix-agent
+      - zabbix-agent2
+      - docker
+      - containerd
+    audit_output_dir: "/ansible/reports/baseline"
+
+  tasks:
+    - name: Exigir limite explicito para proteger el universo de servidores
+      ansible.builtin.assert:
+        that:
+          - ansible_limit is defined
+          - ansible_limit | length > 0
+        fail_msg: "Ejecuta con --limit, por ejemplo --limit linux_prod_gye o --limit one_host."
+
+    - name: Asegurar directorio local de reportes en el nodo de control
+      ansible.builtin.file:
+        path: "{{ audit_output_dir }}"
+        state: directory
+        mode: "0750"
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: Recolectar resumen de seguridad del gestor de paquetes
+      ansible.builtin.command: dnf updateinfo summary
+      register: dnf_updateinfo
+      changed_when: false
+      failed_when: false
+      when: ansible_facts.os_family == "RedHat"
+
+    - name: Verificar si se requiere reinicio en familia RedHat
+      ansible.builtin.command: needs-restarting -r
+      register: reboot_required_redhat
+      changed_when: false
+      failed_when: false
+      when: ansible_facts.os_family == "RedHat"
+
+    - name: Recolectar informacion de servicios
+      ansible.builtin.service_facts:
+
+    - name: Recolectar version de Docker si existe
+      ansible.builtin.command: docker version --format 'Client={{ "{{" }}.Client.Version{{ "}}" }} Server={{ "{{" }}.Server.Version{{ "}}" }}'
+      register: docker_version
+      changed_when: false
+      failed_when: false
+
+    - name: Recolectar contenedores Docker si existen
+      ansible.builtin.command: docker ps --format 'table {{ "{{" }}.Names{{ "}}" }}\t{{ "{{" }}.Status{{ "}}" }}\t{{ "{{" }}.Image{{ "}}" }}'
+      register: docker_ps
+      changed_when: false
+      failed_when: false
+
+    - name: Construir datos de auditoria
+      ansible.builtin.set_fact:
+        baseline_audit:
+          host: "{{ inventory_hostname }}"
+          fqdn: "{{ ansible_facts.fqdn | default('') }}"
+          os: "{{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}"
+          kernel: "{{ ansible_facts.kernel }}"
+          uptime_seconds: "{{ ansible_facts.uptime_seconds }}"
+          cpu_vcpus: "{{ ansible_facts.processor_vcpus | default(ansible_facts.processor_count | default('unknown')) }}"
+          memory_mb: "{{ ansible_facts.memtotal_mb }}"
+          default_ipv4: "{{ ansible_facts.default_ipv4.address | default('') }}"
+          mounts: "{{ ansible_facts.mounts }}"
+          reboot_required: "{{ (reboot_required_redhat.rc | default(0)) == 1 }}"
+          security_summary: "{{ dnf_updateinfo.stdout_lines | default([]) }}"
+          critical_services: "{{ ansible_facts.services | default({}) | dict2items | selectattr('key', 'in', critical_services | map('regex_replace', '$', '.service') | list) | list }}"
+          docker_version: "{{ docker_version.stdout | default('') }}"
+          docker_containers: "{{ docker_ps.stdout_lines | default([]) }}"
+
+    - name: Escribir auditoria JSON del host en el nodo de control
+      ansible.builtin.copy:
+        dest: "{{ audit_output_dir }}/{{ inventory_hostname }}.json"
+        mode: "0640"
+        content: "{{ baseline_audit | to_nice_json }}\n"
+      delegate_to: localhost
+      become: false
+
+    - name: Mostrar resumen compacto
+      ansible.builtin.debug:
+        msg:
+          host: "{{ inventory_hostname }}"
+          os: "{{ baseline_audit.os }}"
+          kernel: "{{ baseline_audit.kernel }}"
+          memory_mb: "{{ baseline_audit.memory_mb }}"
+          reboot_required: "{{ baseline_audit.reboot_required }}"
+          report: "{{ audit_output_dir }}/{{ inventory_hostname }}.json"
