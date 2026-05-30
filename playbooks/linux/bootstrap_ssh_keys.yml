@@ -1,5 +1,5 @@
 ---
-- name: Install Ansible service SSH key on Linux targets
+- name: Instalar llave SSH del servicio Ansible en Linux
   hosts: linux
   gather_facts: false
   become: true
@@ -7,14 +7,14 @@
   vars:
     target_user: "{{ ansible_service_user | default('ansible_svc') }}"
   pre_tasks:
-    - name: Require explicit limit to avoid accidental universe-wide rollout
+    - name: Exigir limite explicito para evitar despliegue accidental masivo
       ansible.builtin.assert:
         that:
           - ansible_limit is defined
           - ansible_limit | length > 0
-        fail_msg: "Run with --limit first, for example --limit linux_prod or --limit one_host."
+        fail_msg: "Ejecuta con --limit, por ejemplo --limit linux_prod o --limit one_host."
 
-    - name: Resolve public key content
+    - name: Resolver contenido de la llave publica
       ansible.builtin.set_fact:
         resolved_public_key: >-
           {{ ansible_service_public_key
@@ -22,21 +22,21 @@
              else lookup('file', ansible_service_public_key_file | default('/home/ansible_svc/.ssh/ansible_id.pub')) }}
 
   tasks:
-    - name: Ensure service user exists
+    - name: Asegurar que exista el usuario de servicio
       ansible.builtin.user:
         name: "{{ target_user }}"
         shell: /bin/bash
         create_home: true
         state: present
 
-    - name: Install public SSH key
+    - name: Instalar llave publica SSH
       ansible.posix.authorized_key:
         user: "{{ target_user }}"
         key: "{{ resolved_public_key }}"
         state: present
         manage_dir: true
 
-    - name: Ensure sudoers drop-in for service user when enabled
+    - name: Asegurar sudoers para usuario de servicio cuando este habilitado
       ansible.builtin.copy:
         dest: "/etc/sudoers.d/90-{{ target_user }}"
         owner: root
