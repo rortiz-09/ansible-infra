@@ -85,6 +85,8 @@ def classify_platform(platform):
 
 def main():
     inv = {"_meta": {"hostvars": {}}}
+    excluded_tags = {"ansible-excluido", "appliance", "no-existe"}
+    excluded_statuses = {"offline", "decommissioning", "inventory"}
     objects = []
     for obj in nb_get("virtualization/virtual-machines/?limit=200"):
         obj["_nb_type"] = "vm"
@@ -105,6 +107,8 @@ def main():
         ambiente = custom(obj, "ambiente") or custom(obj, "environment") or "unknown"
         criticidad = custom(obj, "criticidad") or "unknown"
         tag_list = tags(obj)
+        if status in excluded_statuses or excluded_tags.intersection(tag_list):
+            continue
 
         inv["_meta"]["hostvars"][host] = {
             "ansible_host": addr,
