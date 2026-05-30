@@ -1,0 +1,156 @@
+---
+- name: Pausar o restablecer Trend Micro Deep Security Agent
+  hosts: all
+  gather_facts: true
+  become: true
+  serial: "{{ trendmicro_serial | default(10) }}"
+  vars:
+    trendmicro_action: "pause"
+    trendmicro_tenant: "core"
+    trendmicro_dsm_url: "dsm://agents.deepsecurity.trendmicro.com:443/"
+    trendmicro_linux_dsa_control: "/opt/ds_agent/dsa_control"
+    trendmicro_windows_dsa_dir: 'C:\Program Files\Trend Micro\Deep Security Agent'
+    trendmicro_windows_dsa_control: 'C:\Program Files\Trend Micro\Deep Security Agent\dsa_control.exe'
+    trendmicro_allow_change: false
+
+  pre_tasks:
+    - name: Exigir limite explicito de hosts
+      ansible.builtin.assert:
+        that:
+          - ansible_limit is defined
+          - ansible_limit | length > 0
+        fail_msg: "Ejecuta con --limit, por ejemplo --limit one_host o --limit linux_prod_gye."
+
+    - name: Exigir aprobacion explicita
+      ansible.builtin.assert:
+        that:
+          - trendmicro_allow_change | bool
+        fail_msg: "Define -e trendmicro_allow_change=true despues de confirmar ventana de mantenimiento y aprobacion de Ciberseguridad."
+
+    - name: Validar accion solicitada
+      ansible.builtin.assert:
+        that:
+          - trendmicro_action in ['pause', 'restore']
+        fail_msg: "trendmicro_action debe ser pause o restore."
+
+    - name: Validar que exista el secreto para pausar
+      ansible.builtin.assert:
+        that:
+          - trendmicro_uninstall_password is defined
+          - trendmicro_uninstall_password | length > 0
+        fail_msg: "Define trendmicro_uninstall_password desde Ansible Vault o una fuente de secretos aprobada."
+      no_log: true
+      when: trendmicro_action == "pause"
+
+    - name: Validar que existan datos del tenant para restablecer
+      ansible.builtin.assert:
+        that:
+          - trendmicro_tenants is defined
+          - trendmicro_tenant in trendmicro_tenants
+          - trendmicro_tenants[trendmicro_tenant].tenant_id is defined
+          - trendmicro_tenants[trendmicro_tenant].tenant_id | length > 0
+          - trendmicro_tenants[trendmicro_tenant].token is defined
+          - trendmicro_tenants[trendmicro_tenant].token | length > 0
+        fail_msg: "Define trendmicro_tenants.<core|pro>.tenant_id/token desde Ansible Vault."
+      no_log: true
+      when: trendmicro_action == "restore"
+
+  tasks:
+    - name: Verificar binario Deep Security Agent en Linux
+      ansible.builtin.stat:
+        path: "{{ trendmicro_linux_dsa_control }}"
+      register: trendmicro_linux_binary
+      when: ansible_facts.system == "Linux"
+
+    - name: Pausar proteccion Trend Micro en Linux
+      ansible.builtin.command:
+        argv:
+          - "{{ trendmicro_linux_dsa_control }}"
+          - "-r"
+          - "-p"
+          - "{{ trendmicro_uninstall_password }}"
+      register: trendmicro_linux_pause
+      changed_when: "'HTTP Status: 200' in (trendmicro_linux_pause.stdout + trendmicro_linux_pause.stderr)"
+      failed_when:
+        - trendmicro_linux_pause.rc != 0
+        - "'HTTP Status: 200' not in (trendmicro_linux_pause.stdout + trendmicro_linux_pause.stderr)"
+      no_log: true
+      when:
+        - ansible_facts.system == "Linux"
+        - trendmicro_action == "pause"
+        - trendmicro_linux_binary.stat.exists
+
+    - name: Restablecer proteccion Trend Micro en Linux
+      ansible.builtin.command:
+        argv:
+          - "{{ trendmicro_linux_dsa_control }}"
+          - "-a"
+          - "{{ trendmicro_dsm_url }}"
+          - "tenantID:{{ trendmicro_tenants[trendmicro_tenant].tenant_id }}"
+          - "token:{{ trendmicro_tenants[trendmicro_tenant].token }}"
+      register: trendmicro_linux_restore
+      changed_when: trendmicro_linux_restore.rc == 0
+      no_log: true
+      when:
+        - ansible_facts.system == "Linux"
+        - trendmicro_action == "restore"
+        - trendmicro_linux_binary.stat.exists
+
+    - name: Fallar si falta el binario del agente en Linux
+      ansible.builtin.fail:
+        msg: "No se encontro el binario de Trend Micro Deep Security Agent en {{ trendmicro_linux_dsa_control }}."
+      when:
+        - ansible_facts.system == "Linux"
+        - not trendmicro_linux_binary.stat.exists
+
+    - name: Verificar binario Deep Security Agent en Windows
+      ansible.windows.win_stat:
+        path: "{{ trendmicro_windows_dsa_control }}"
+      register: trendmicro_windows_binary
+      become: false
+      when: ansible_facts.os_family == "Windows"
+
+    - name: Pausar proteccion Trend Micro en Windows
+      ansible.windows.win_command: 'dsa_control.exe -r -p "{{ trendmicro_uninstall_password }}"'
+      args:
+        chdir: "{{ trendmicro_windows_dsa_dir }}"
+      register: trendmicro_windows_pause
+      changed_when: trendmicro_windows_pause.rc == 0
+      no_log: true
+      become: false
+      when:
+        - ansible_facts.os_family == "Windows"
+        - trendmicro_action == "pause"
+        - trendmicro_windows_binary.stat.exists
+
+    - name: Restablecer proteccion Trend Micro en Windows
+      ansible.windows.win_command: >-
+        dsa_control.exe -a {{ trendmicro_dsm_url }}
+        "tenantID:{{ trendmicro_tenants[trendmicro_tenant].tenant_id }}"
+        "token:{{ trendmicro_tenants[trendmicro_tenant].token }}"
+      args:
+        chdir: "{{ trendmicro_windows_dsa_dir }}"
+      register: trendmicro_windows_restore
+      changed_when: trendmicro_windows_restore.rc == 0
+      no_log: true
+      become: false
+      when:
+        - ansible_facts.os_family == "Windows"
+        - trendmicro_action == "restore"
+        - trendmicro_windows_binary.stat.exists
+
+    - name: Fallar si falta el binario del agente en Windows
+      ansible.builtin.fail:
+        msg: "No se encontro el binario de Trend Micro Deep Security Agent en {{ trendmicro_windows_dsa_control }}."
+      when:
+        - ansible_facts.os_family == "Windows"
+        - not trendmicro_windows_binary.stat.exists
+
+    - name: Mostrar resumen seguro de ejecucion
+      ansible.builtin.debug:
+        msg:
+          host: "{{ inventory_hostname }}"
+          action: "{{ trendmicro_action }}"
+          tenant: "{{ trendmicro_tenant if trendmicro_action == 'restore' else 'not_applicable' }}"
+          platform: "{{ ansible_facts.system | default(ansible_facts.os_family | default('unknown')) }}"
+          result: "comando_ejecutado_con_salida_sensible_oculta"
