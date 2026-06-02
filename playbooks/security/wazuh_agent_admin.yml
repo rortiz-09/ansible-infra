@@ -1,0 +1,368 @@
+---
+- name: Administrar y diagnosticar agente Wazuh en Linux
+  hosts: all
+  gather_facts: true
+  become: true
+  serial: 10
+  vars:
+    wazuh_manager_host: "3.132.142.12"
+    wazuh_manager_ports:
+      - 1514
+      - 1515
+    wazuh_service_name: wazuh-agent
+    wazuh_log_file: /var/ossec/logs/ossec.log
+    wazuh_log_lines: 80
+    wazuh_report_dir: /ansible/reports/wazuh-agent
+    wazuh_action: "0"
+    wazuh_action_map:
+      "0": "auto_validar_y_corregir_seguro"
+      "1": "solo_auditoria"
+      "2": "reconectar_reiniciar_servicio"
+      "3": "reenrolar_identidad"
+      "4": "auditoria_y_reconexion"
+      "5": "auditoria_reconexion_y_reenrolamiento"
+    allow_wazuh_restart: false
+    allow_wazuh_reenroll: false
+    wazuh_auto_restart: true
+    wazuh_auto_reenroll: false
+    wazuh_reconnect_delay: 10
+    wazuh_reconnect_retries: 6
+    wazuh_client_keys_file: /var/ossec/etc/client.keys
+    wazuh_authd_pass_file: /var/ossec/etc/authd.pass
+    wazuh_enrollment_port: 1515
+    wazuh_enrollment_group: xtrim-ti-linux-servers
+    wazuh_expected_agent_name: "{{ inventory_hostname }}"
+    wazuh_expected_agent_ip: "{{ ansible_host | default(inventory_hostname) }}"
+
+  pre_tasks:
+    - name: Exigir limite explicito para evitar ejecucion masiva accidental
+      ansible.builtin.assert:
+        that:
+          - ansible_limit is defined
+          - ansible_limit | length > 0
+        fail_msg: "Ejecuta con --limit, por ejemplo --limit XTR-SRV-CPAPP-K8S o --limit wazuh_targets."
+
+    - name: Validar accion Wazuh solicitada
+      ansible.builtin.assert:
+        that:
+          - wazuh_action | string in wazuh_action_map.keys() | list
+        fail_msg: >-
+          wazuh_action invalida. Usa:
+          0=auto_validar_y_corregir_seguro,
+          1=solo_auditoria,
+          2=reconectar_reiniciar_servicio,
+          3=reenrolar_identidad,
+          4=auditoria_y_reconexion,
+          5=auditoria_reconexion_y_reenrolamiento.
+
+    - name: Mostrar modo de ejecucion seleccionado
+      ansible.builtin.debug:
+        msg:
+          wazuh_action: "{{ wazuh_action | string }}"
+          meaning: "{{ wazuh_action_map[wazuh_action | string] }}"
+          note: "El re-enrolamiento requiere limpiar duplicados en el manager si aparece 'Duplicate agent name'."
+      run_once: true
+
+    - name: Asegurar directorio local de reportes en el nodo de control
+      ansible.builtin.file:
+        path: "{{ wazuh_report_dir }}"
+        state: directory
+        mode: "0750"
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+  tasks:
+    - name: Verificar instalacion del agente Wazuh
+      ansible.builtin.stat:
+        path: /var/ossec/bin/wazuh-control
+      register: wazuh_control
+
+    - name: Recolectar estado de servicios
+      ansible.builtin.service_facts:
+
+    - name: Consultar estado systemd del agente
+      ansible.builtin.command: systemctl status "{{ wazuh_service_name }}" --no-pager
+      register: wazuh_status
+      changed_when: false
+      failed_when: false
+
+    - name: Consultar si el agente esta habilitado al arranque
+      ansible.builtin.command: systemctl is-enabled "{{ wazuh_service_name }}"
+      register: wazuh_enabled
+      changed_when: false
+      failed_when: false
+
+    - name: Resolver acciones aplicables para este host
+      ansible.builtin.set_fact:
+        wazuh_do_restart: >-
+          {{
+            allow_wazuh_restart | bool
+            or (wazuh_action | string in ['2', '4', '5'])
+            or (
+              wazuh_action | string == '0'
+              and wazuh_auto_restart | bool
+              and wazuh_control.stat.exists | bool
+              and (wazuh_status.rc != 0 or wazuh_enabled.stdout != 'enabled')
+            )
+          }}
+        wazuh_do_reenroll: >-
+          {{
+            allow_wazuh_reenroll | bool
+            or (wazuh_action | string in ['3', '5'])
+            or (
+              wazuh_action | string == '0'
+              and wazuh_auto_reenroll | bool
+              and wazuh_control.stat.exists | bool
+            )
+          }}
+
+    - name: Leer ultimas lineas del log del agente
+      ansible.builtin.command: tail -n "{{ wazuh_log_lines }}" "{{ wazuh_log_file }}"
+      register: wazuh_log_tail
+      changed_when: false
+      failed_when: false
+      no_log: true
+
+    - name: Leer identidad segura del agente Wazuh
+      ansible.builtin.shell: >-
+        set -o pipefail &&
+        awk '{print $1, $2, $3}' "{{ wazuh_client_keys_file }}"
+      args:
+        executable: /bin/bash
+      register: wazuh_client_identity
+      changed_when: false
+      failed_when: false
+      no_log: true
+
+    - name: Leer nombre de enrollment configurado
+      ansible.builtin.shell: >-
+        set -o pipefail &&
+        sed -n '/<enrollment>/,/<\/enrollment>/p' /var/ossec/etc/ossec.conf |
+        sed -n 's:.*<agent_name>\(.*\)</agent_name>.*:\1:p' |
+        tail -n 1
+      args:
+        executable: /bin/bash
+      register: wazuh_enrollment_agent_name
+      changed_when: false
+      failed_when: false
+
+    - name: Re-enrolar agente Wazuh con identidad esperada solo si fue autorizado
+      when:
+        - wazuh_do_reenroll | bool
+        - wazuh_control.stat.exists | bool
+      block:
+        - name: Re-enrolar agente con respaldo y nombre/IP esperados
+          ansible.builtin.shell: |
+            set -euo pipefail
+            conf="/var/ossec/etc/ossec.conf"
+            keyfile="{{ wazuh_client_keys_file }}"
+            passfile="{{ wazuh_authd_pass_file }}"
+            manager="{{ wazuh_manager_host }}"
+            port="{{ wazuh_enrollment_port }}"
+            expected_name="{{ wazuh_expected_agent_name }}"
+            expected_ip="{{ wazuh_expected_agent_ip }}"
+            group_name="{{ wazuh_enrollment_group }}"
+            ts="$(date +%Y%m%d-%H%M%S)"
+
+            test -x /var/ossec/bin/agent-auth
+            test -s "$passfile"
+            cp -a "$conf" "${conf}.pre-reenroll-${ts}"
+            cp -a "$keyfile" "${keyfile}.pre-reenroll-${ts}" 2>/dev/null || true
+
+            python3 - "$conf" "$expected_name" <<'PY'
+            import re
+            import sys
+
+            path = sys.argv[1]
+            name = sys.argv[2]
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+
+            match = re.search(r"(<enrollment>)(.*?)(</enrollment>)", text, flags=re.S)
+            if not match:
+                raise SystemExit("missing <enrollment>")
+
+            body = match.group(2)
+            if re.search(r"<agent_name>.*?</agent_name>", body, flags=re.S):
+                body = re.sub(r"<agent_name>.*?</agent_name>", "<agent_name>" + name + "</agent_name>", body, flags=re.S)
+            else:
+                body = "\n      <agent_name>" + name + "</agent_name>" + body
+
+            if re.search(r"<enabled>.*?</enabled>", body, flags=re.S):
+                body = re.sub(r"<enabled>.*?</enabled>", "<enabled>yes</enabled>", body, flags=re.S)
+            else:
+                body = "\n      <enabled>yes</enabled>" + body
+
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(text[:match.start(2)] + body + text[match.end(2):])
+            PY
+
+            systemctl stop "{{ wazuh_service_name }}" || true
+            rm -f "$keyfile"
+            auth_pass="$(cat "$passfile")"
+            /var/ossec/bin/agent-auth \
+              -m "$manager" \
+              -p "$port" \
+              -A "$expected_name" \
+              -I "$expected_ip" \
+              -G "$group_name" \
+              -P "$auth_pass"
+            unset auth_pass
+
+            test -s "$keyfile"
+            chown root:wazuh "$keyfile" 2>/dev/null || chown root:ossec "$keyfile" 2>/dev/null || true
+            chmod 640 "$keyfile" || true
+            systemctl start "{{ wazuh_service_name }}"
+          args:
+            executable: /bin/bash
+          register: wazuh_reenroll_result
+          changed_when: true
+          no_log: true
+
+      rescue:
+        - name: Restaurar ultima llave si el re-enrolamiento falla
+          ansible.builtin.shell: |
+            set -euo pipefail
+            keyfile="{{ wazuh_client_keys_file }}"
+            latest_backup="$(ls -1t "${keyfile}".pre-* 2>/dev/null | head -1 || true)"
+            if [ -n "$latest_backup" ]; then
+              cp -a "$latest_backup" "$keyfile"
+            fi
+            systemctl start "{{ wazuh_service_name }}" || true
+          args:
+            executable: /bin/bash
+          changed_when: true
+          no_log: true
+
+        - name: Fallar con mensaje seguro de re-enrolamiento
+          ansible.builtin.fail:
+            msg: >-
+              Re-enrolamiento Wazuh fallido. Si el log del agente muestra
+              'Duplicate agent name', primero limpia el agente duplicado en el manager/consola Wazuh
+              y vuelve a ejecutar con allow_wazuh_reenroll=true.
+
+    - name: Probar conectividad TCP hacia SIEM desde el servidor
+      ansible.builtin.wait_for:
+        host: "{{ wazuh_manager_host }}"
+        port: "{{ item }}"
+        timeout: 8
+        connect_timeout: 5
+        state: started
+      loop: "{{ wazuh_manager_ports }}"
+      register: wazuh_port_checks
+      changed_when: false
+      failed_when: false
+
+    - name: Reiniciar agente Wazuh solo si fue autorizado
+      ansible.builtin.service:
+        name: "{{ wazuh_service_name }}"
+        state: restarted
+        enabled: true
+      when:
+        - wazuh_do_restart | bool
+        - wazuh_control.stat.exists | bool
+
+    - name: Esperar que el agente Wazuh quede activo despues del reinicio
+      ansible.builtin.command: systemctl is-active "{{ wazuh_service_name }}"
+      register: wazuh_restart_active_check
+      changed_when: false
+      failed_when: false
+      retries: "{{ wazuh_reconnect_retries }}"
+      delay: "{{ wazuh_reconnect_delay }}"
+      until: wazuh_restart_active_check.stdout == "active"
+      when:
+        - wazuh_do_restart | bool
+        - wazuh_control.stat.exists | bool
+
+    - name: Reconsultar estado despues del reinicio autorizado
+      ansible.builtin.command: systemctl is-active "{{ wazuh_service_name }}"
+      register: wazuh_active_after
+      changed_when: false
+      failed_when: false
+
+    - name: Buscar eventos recientes de conexion del agente
+      ansible.builtin.shell: >-
+        set -o pipefail &&
+        grep -Ei 'connect|disconnect|server|manager|error|warning|registered|auth' "{{ wazuh_log_file }}" |
+        tail -n "{{ wazuh_log_lines }}"
+      args:
+        executable: /bin/bash
+      register: wazuh_connection_events
+      changed_when: false
+      failed_when: false
+      no_log: true
+
+    - name: Inicializar resultados de conectividad SIEM
+      ansible.builtin.set_fact:
+        wazuh_siem_port_results: []
+
+    - name: Normalizar resultados de conectividad SIEM
+      ansible.builtin.set_fact:
+        wazuh_siem_port_results: >-
+          {{
+            wazuh_siem_port_results
+            + [{
+              'port': item.item,
+              'ok': not (item.failed | default(true)),
+              'message': item.msg | default('')
+            }]
+          }}
+      loop: "{{ wazuh_port_checks.results | default([]) }}"
+      no_log: true
+
+    - name: Construir reporte Wazuh
+      ansible.builtin.set_fact:
+        wazuh_agent_report:
+          host: "{{ inventory_hostname }}"
+          ansible_host: "{{ ansible_host | default(inventory_hostname) }}"
+          fqdn: "{{ ansible_facts.fqdn | default('') }}"
+          os: "{{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}"
+          kernel: "{{ ansible_facts.kernel }}"
+          installed: "{{ wazuh_control.stat.exists | bool }}"
+          action: "{{ wazuh_action | string }}"
+          action_meaning: "{{ wazuh_action_map[wazuh_action | string] }}"
+          restart_applied: "{{ wazuh_do_restart | default(false) }}"
+          reenroll_applied: "{{ wazuh_do_reenroll | default(false) }}"
+          expected_agent_name: "{{ inventory_hostname }}"
+          local_hostname: "{{ ansible_facts.hostname | default('') }}"
+          client_identity_raw: "{{ wazuh_client_identity.stdout | default('') }}"
+          client_id: "{{ (wazuh_client_identity.stdout.split() | default([]))[0] | default('') }}"
+          client_name: "{{ (wazuh_client_identity.stdout.split() | default([]))[1] | default('') }}"
+          client_ip: "{{ (wazuh_client_identity.stdout.split() | default([]))[2] | default('') }}"
+          enrollment_agent_name: "{{ wazuh_enrollment_agent_name.stdout | default('') }}"
+          identity_matches_inventory: "{{ ((wazuh_client_identity.stdout.split() | default([]))[1] | default('')) == inventory_hostname }}"
+          service_active: "{{ wazuh_active_after.stdout | default('unknown') }}"
+          service_enabled: "{{ wazuh_enabled.stdout | default('unknown') }}"
+          service_status_rc: "{{ wazuh_status.rc }}"
+          siem_host: "{{ wazuh_manager_host }}"
+          siem_ports: "{{ wazuh_siem_port_results }}"
+          mounts: "{{ ansible_facts.mounts }}"
+          log_tail_available: "{{ wazuh_log_tail.rc == 0 }}"
+          log_tail: "{{ wazuh_log_tail.stdout_lines | default([]) }}"
+          connection_events_available: "{{ wazuh_connection_events.rc == 0 }}"
+          connection_events: "{{ wazuh_connection_events.stdout_lines | default([]) }}"
+      no_log: true
+
+    - name: Escribir reporte JSON del host en el nodo de control
+      ansible.builtin.copy:
+        dest: "{{ wazuh_report_dir }}/{{ inventory_hostname }}.json"
+        mode: "0640"
+        content: "{{ wazuh_agent_report | to_nice_json }}\n"
+      delegate_to: localhost
+      become: false
+      no_log: true
+
+    - name: Mostrar resumen compacto
+      ansible.builtin.debug:
+        msg:
+          host: "{{ inventory_hostname }}"
+          installed: "{{ wazuh_agent_report.installed }}"
+          action: "{{ wazuh_agent_report.action }}"
+          client_id: "{{ wazuh_agent_report.client_id }}"
+          client_name: "{{ wazuh_agent_report.client_name }}"
+          identity_matches_inventory: "{{ wazuh_agent_report.identity_matches_inventory }}"
+          service_active: "{{ wazuh_agent_report.service_active }}"
+          service_enabled: "{{ wazuh_agent_report.service_enabled }}"
+          siem_host: "{{ wazuh_agent_report.siem_host }}"
+          report: "{{ wazuh_report_dir }}/{{ inventory_hostname }}.json"

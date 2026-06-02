@@ -1,0 +1,128 @@
+---
+- name: Administrar y diagnosticar agente Wazuh en Windows
+  hosts: windows
+  gather_facts: true
+  serial: 10
+  vars:
+    wazuh_manager_host: "3.132.142.12"
+    wazuh_manager_ports:
+      - 1514
+      - 1515
+    wazuh_service_name: WazuhSvc
+    wazuh_install_dir: 'C:\Program Files (x86)\ossec-agent'
+    wazuh_log_file: 'C:\Program Files (x86)\ossec-agent\ossec.log'
+    wazuh_report_dir: 'C:\ansible\reports\wazuh-agent'
+    wazuh_action: "0"
+    wazuh_action_map:
+      "0": "auto_validar_y_corregir_seguro"
+      "1": "solo_auditoria"
+      "2": "reconectar_reiniciar_servicio"
+      "4": "auditoria_y_reconexion"
+    allow_wazuh_restart: false
+    wazuh_auto_restart: true
+
+  pre_tasks:
+    - name: Exigir limite explicito para evitar ejecucion masiva accidental
+      ansible.builtin.assert:
+        that:
+          - ansible_limit is defined
+          - ansible_limit | length > 0
+        fail_msg: "Ejecuta con --limit, por ejemplo --limit un_servidor_windows."
+
+    - name: Validar accion Wazuh solicitada
+      ansible.builtin.assert:
+        that:
+          - wazuh_action | string in wazuh_action_map.keys() | list
+        fail_msg: >-
+          wazuh_action invalida para Windows. Usa:
+          0=auto_validar_y_corregir_seguro,
+          1=solo_auditoria,
+          2=reconectar_reiniciar_servicio,
+          4=auditoria_y_reconexion.
+
+    - name: Mostrar modo de ejecucion seleccionado
+      ansible.builtin.debug:
+        msg:
+          wazuh_action: "{{ wazuh_action | string }}"
+          meaning: "{{ wazuh_action_map[wazuh_action | string] }}"
+      run_once: true
+
+  tasks:
+    - name: Verificar instalacion del agente Wazuh
+      ansible.windows.win_stat:
+        path: "{{ wazuh_install_dir }}"
+      register: wazuh_install_dir_stat
+
+    - name: Consultar servicio Wazuh
+      ansible.windows.win_service_info:
+        name: "{{ wazuh_service_name }}"
+      register: wazuh_service_info
+
+    - name: Resolver acciones aplicables para este host
+      ansible.builtin.set_fact:
+        wazuh_do_restart: >-
+          {{
+            allow_wazuh_restart | bool
+            or (wazuh_action | string in ['2', '4'])
+            or (
+              wazuh_action | string == '0'
+              and wazuh_auto_restart | bool
+              and wazuh_service_info.services | length > 0
+              and (
+                wazuh_service_info.services[0].state != 'started'
+                or wazuh_service_info.services[0].start_mode != 'auto'
+              )
+            )
+          }}
+
+    - name: Probar conectividad TCP hacia SIEM
+      ansible.windows.win_wait_for:
+        host: "{{ wazuh_manager_host }}"
+        port: "{{ item }}"
+        timeout: 8
+        state: started
+      loop: "{{ wazuh_manager_ports }}"
+      register: wazuh_port_checks
+      failed_when: false
+      changed_when: false
+
+    - name: Recolectar estado de discos
+      ansible.windows.win_shell: |
+        Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" |
+          Select-Object DeviceID,
+            @{Name='SizeGB';Expression={[math]::Round($_.Size/1GB,2)}},
+            @{Name='FreeGB';Expression={[math]::Round($_.FreeSpace/1GB,2)}},
+            @{Name='FreePct';Expression={[math]::Round(($_.FreeSpace/$_.Size)*100,2)}} |
+          ConvertTo-Json -Compress
+      register: wazuh_disk_json
+      changed_when: false
+
+    - name: Leer ultimas lineas del log del agente
+      ansible.windows.win_shell: |
+        if (Test-Path "{{ wazuh_log_file }}") {
+          Get-Content -LiteralPath "{{ wazuh_log_file }}" -Tail 80
+        }
+      register: wazuh_log_tail
+      changed_when: false
+      no_log: true
+
+    - name: Reiniciar agente Wazuh solo si fue autorizado
+      ansible.windows.win_service:
+        name: "{{ wazuh_service_name }}"
+        state: restarted
+        start_mode: auto
+      when:
+        - wazuh_do_restart | bool
+        - wazuh_service_info.services | length > 0
+
+    - name: Mostrar resumen compacto
+      ansible.builtin.debug:
+        msg:
+          host: "{{ inventory_hostname }}"
+          action: "{{ wazuh_action | string }}"
+          installed: "{{ wazuh_install_dir_stat.stat.exists | default(false) }}"
+          restart_applied: "{{ wazuh_do_restart | default(false) }}"
+          service_exists: "{{ wazuh_service_info.services | length > 0 }}"
+          service_state: "{{ wazuh_service_info.services[0].state | default('missing') if (wazuh_service_info.services | length > 0) else 'missing' }}"
+          service_start_mode: "{{ wazuh_service_info.services[0].start_mode | default('missing') if (wazuh_service_info.services | length > 0) else 'missing' }}"
+          siem_host: "{{ wazuh_manager_host }}"
