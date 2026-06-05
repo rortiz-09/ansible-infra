@@ -1,0 +1,16 @@
+---
+- name: Validate Windows WinRM HTTPS with Kerberos
+  hosts: windows
+  gather_facts: false
+  tasks:
+    - name: Validate WinRM authentication
+      ansible.windows.win_ping:
+
+    - name: Read Windows identity
+      ansible.windows.win_command: whoami
+      register: windows_whoami
+      changed_when: false
+
+    - name: Show connected identity
+      ansible.builtin.debug:
+        var: windows_whoami.stdout
