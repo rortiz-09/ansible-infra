@@ -1,0 +1,71 @@
+---
+# Sincronizacion vCenter -> NetBox.
+# Lee el inventario de vCenter y actualiza en NetBox el direccionamiento, las
+# capacidades (vCPU, RAM), el sistema operativo y los custom fields vcenter_*.
+# Las VMs que desaparecen de vCenter no se borran: se marcan offline y se guarda
+# la fecha y el usuario que las elimino, tomado del log de eventos de vCenter.
+- name: Sincronizacion vCenter hacia NetBox
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.yml
+  vars:
+    discovery_ts: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
+  tasks:
+    - name: Validar credenciales necesarias
+      ansible.builtin.assert:
+        that:
+          - netbox_token | length > 0
+          - vcenter_username | length > 0
+          - vcenter_password | length > 0
+        fail_msg: "Exporta NETBOX_TOKEN, VCENTER_USER y VCENTER_PASS antes de ejecutar."
+
+    - name: Listar VMs de vCenter
+      community.vmware.vmware_vm_info:
+        hostname: "{{ vcenter_hostname }}"
+        username: "{{ vcenter_username }}"
+        password: "{{ vcenter_password }}"
+        validate_certs: "{{ vcenter_validate_certs }}"
+        vm_type: vm
+      register: vc
+
+    - name: Obtener detalle de cada VM
+      community.vmware.vmware_guest_info:
+        hostname: "{{ vcenter_hostname }}"
+        username: "{{ vcenter_username }}"
+        password: "{{ vcenter_password }}"
+        validate_certs: "{{ vcenter_validate_certs }}"
+        name: "{{ item.guest_name }}"
+      loop: "{{ vc.virtual_machines }}"
+      loop_control:
+        label: "{{ item.guest_name }}"
+      register: vc_detail
+
+    - name: Actualizar VMs en NetBox
+      netbox.netbox.netbox_virtual_machine:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        validate_certs: "{{ netbox_validate_certs }}"
+        data:
+          name: "{{ item.instance.hw_name }}"
+          cluster: "VMware vSphere"
+          status: "{{ 'active' if item.instance.hw_power_status == 'poweredOn' else 'offline' }}"
+          vcpus: "{{ item.instance.hw_processor_count | default(omit) }}"
+          memory: "{{ item.instance.hw_memtotal_mb | default(omit) }}"
+          custom_fields:
+            vcenter_instance_uuid: "{{ item.instance.instance_uuid | default(omit) }}"
+            vcenter_bios_uuid: "{{ item.instance.hw_product_uuid | default(omit) }}"
+            vcenter_power_state: "{{ item.instance.hw_power_status | default(omit) }}"
+            source: "vCenter"
+            last_discovered: "{{ discovery_ts }}"
+        state: present
+      loop: "{{ vc_detail.results }}"
+      loop_control:
+        label: "{{ item.instance.hw_name | default('desconocida') }}"
+      when: item.instance is defined
+
+    - name: Reconciliar bajas de vCenter (soft-delete con auditoria)
+      ansible.builtin.include_tasks: tasks/vcenter_reconcile.yml
+      vars:
+        live_vm_names: "{{ vc.virtual_machines | map(attribute='guest_name') | list }}"

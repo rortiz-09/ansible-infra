@@ -1,0 +1,7 @@
+---
+collections:
+  - name: amazon.aws
+  - name: netbox.netbox
+  - name: community.aws
+  - name: community.vmware
+  - name: ansible.netcommon

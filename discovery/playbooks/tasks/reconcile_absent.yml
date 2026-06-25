@@ -1,0 +1,36 @@
+---
+# Marca como offline las VMs AWS de la cuenta cuyo instance_id ya no esta vivo.
+# No se borra ningun objeto: se conserva el historico con la fecha de baja.
+- name: "[{{ acct.name }}] Listar VMs registradas de la cuenta"
+  ansible.builtin.uri:
+    url: "{{ netbox_url }}/api/virtualization/virtual-machines/?cf_aws_account_id={{ acct.account_id }}&limit=500"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ netbox_token }}"
+      Accept: application/json
+    validate_certs: "{{ netbox_validate_certs }}"
+  register: nb_vms
+
+- name: "[{{ acct.name }}] Soft-delete de instancias ausentes"
+  ansible.builtin.uri:
+    url: "{{ netbox_url }}/api/virtualization/virtual-machines/{{ item.id }}/"
+    method: PATCH
+    headers:
+      Authorization: "Bearer {{ netbox_token }}"
+      Content-Type: application/json
+    body_format: json
+    body:
+      status: offline
+      custom_fields:
+        decommissioned_at: "{{ discovery_ts }}"
+        decommissioned_by: "AWS discovery: instancia ausente en {{ acct.name }}"
+        source: "AWS"
+    status_code: [200]
+    validate_certs: "{{ netbox_validate_certs }}"
+  loop: "{{ nb_vms.json.results }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when:
+    - item.custom_fields.aws_instance_id is defined and item.custom_fields.aws_instance_id
+    - item.custom_fields.aws_instance_id not in live_instance_ids
+    - item.status.value != 'offline'

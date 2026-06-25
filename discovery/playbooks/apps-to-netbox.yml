@@ -1,0 +1,57 @@
+---
+# Descubrimiento de aplicaciones por servidor usando facts de Ansible.
+# Recolecta paquetes instalados, servicios en ejecucion y puertos en escucha desde
+# cada servidor (por la relacion de confianza de ansible-core) y los registra en
+# NetBox. La idea es que el usuario vea, ordenado, que corre en cada maquina.
+#
+# El inventario 'servidores' debe existir en el inventario de ansible-core.
+# El emparejamiento con NetBox se hace por nombre corto del host; si el nombre en
+# NetBox difiere, ajustar la variable netbox_name.
+- name: Descubrir aplicaciones por servidor y registrarlas en NetBox
+  hosts: servidores
+  gather_facts: true
+  vars_files:
+    - ../group_vars/all.yml
+  vars:
+    discovery_ts: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
+    netbox_name: "{{ inventory_hostname_short }}"
+  tasks:
+    - name: Recolectar paquetes instalados
+      ansible.builtin.package_facts:
+      failed_when: false
+
+    - name: Recolectar servicios del sistema
+      ansible.builtin.service_facts:
+      failed_when: false
+
+    - name: Recolectar puertos en escucha (Linux)
+      ansible.builtin.shell: |
+        ss -tulpn 2>/dev/null | awk 'NR>1 {print $5}' | sed 's/.*://' | sort -un | paste -sd, -
+      register: listen_ports
+      changed_when: false
+      failed_when: false
+      when: ansible_system == "Linux"
+
+    - name: Calcular lista de servicios en ejecucion
+      ansible.builtin.set_fact:
+        servicios_activos: >-
+          {{ (ansible_facts.services | default({}) | dict2items
+              | selectattr('value.state', 'equalto', 'running')
+              | map(attribute='key') | map('regex_replace', '\.service$', '')
+              | sort | unique) }}
+
+    - name: Actualizar aplicaciones y puertos del host en NetBox
+      netbox.netbox.netbox_virtual_machine:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        validate_certs: "{{ netbox_validate_certs }}"
+        data:
+          name: "{{ netbox_name }}"
+          custom_fields:
+            aplicaciones: "{{ servicios_activos | join(', ') }}"
+            puertos_escucha: "{{ listen_ports.stdout | default('') }}"
+            source: "Ansible-facts"
+            last_discovered: "{{ discovery_ts }}"
+        state: present
+      delegate_to: localhost
+      failed_when: false

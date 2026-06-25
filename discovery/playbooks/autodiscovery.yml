@@ -1,0 +1,25 @@
+---
+# Auto-discovery AWS -> NetBox para Xtrim/BSS
+# AWS: solo lectura (*_info). NetBox: state=present (idempotente). NO borra nada.
+# Ejecutar:  ansible-playbook playbooks/autodiscovery.yml   (--check para dry-run)
+- name: AWS -> NetBox autodiscovery (read-only AWS / write NetBox)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.yml
+  vars:
+    # Marca de tiempo unica de la corrida, para el campo last_discovered.
+    discovery_ts: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
+  tasks:
+    - name: Validar token NetBox presente
+      ansible.builtin.assert:
+        that: netbox_token | length > 0
+        fail_msg: "Exporta NETBOX_TOKEN antes de ejecutar."
+
+    - name: Procesar cada cuenta AWS
+      ansible.builtin.include_tasks: tasks/account.yml
+      loop: "{{ aws_accounts }}"
+      loop_control:
+        loop_var: acct
+        label: "{{ acct.name }}"

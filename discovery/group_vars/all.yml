@@ -1,0 +1,62 @@
+---
+# Configuracion compartida del auto-discovery hacia NetBox.
+# Regla general: las fuentes (AWS, vCenter, servidores) se leen en modo lectura
+# y NetBox se actualiza de forma idempotente. Nunca se borra nada: las bajas se
+# marcan con estado y fecha/usuario para conservar el historico.
+
+netbox_url: "https://inventori.xtrim.com.ec"
+netbox_token: "{{ lookup('env', 'NETBOX_TOKEN') }}"   # exportar NETBOX_TOKEN; no se guarda en el repo
+netbox_validate_certs: false                          # certificado interno (ADCS)
+discovered_tag: "AWS-discovered"
+
+aws_region: "us-east-1"
+
+# Cuentas AWS en alcance. Data Analytics queda fuera por politica.
+aws_accounts:
+  - { name: integrationhubs-prod,    profile: xtrim-integrationhubs-prod,    account_id: "578761488300", tenant: "AWS - IntegrationHubs-Prod",    ambiente: prod }
+  - { name: integrationhub-dev-test, profile: xtrim-integrationhub-dev-test, account_id: "520827483144", tenant: "AWS - IntegrationHub-Dev-Test", ambiente: dev-test }
+  - { name: grafana-xtrim,           profile: xtrim-grafana-xtrim,           account_id: "151562994307", tenant: "AWS - Grafana-XTRIM",           ambiente: observability }
+  - { name: networkhub,              profile: xtrim-networkhub,              account_id: "918309350816", tenant: "AWS - NetworkHub",              ambiente: network }
+  - { name: digitalbusiness,         profile: xtrim-digitalbusiness,         account_id: "277790937284", tenant: "AWS - DigitalBusiness",         ambiente: prod }
+  - { name: contactcenter,           profile: xtrim-contactcenter,           account_id: "629061775681", tenant: "AWS - ContactCenter",           ambiente: prod }
+
+# Las instancias cuyo nombre empieza con este patron son efimeras (autoscaler).
+# No se inventarian como VMs; solo cuentan para el consumo de IPs.
+ephemeral_name_pattern: "^karpenter"
+
+# Memoria por tipo de instancia (MB). ec2_instance_info entrega vCPU pero no RAM,
+# asi que la mantenemos aqui para los tipos en uso.
+instance_type_mem:
+  t3.micro: 1024
+  t2.medium: 4096
+  t3.medium: 4096
+  c5.large: 4096
+  t3a.large: 8192
+  t3.xlarge: 16384
+  t3a.xlarge: 16384
+  i4i.large: 16384
+  m6a.xlarge: 16384
+  t3.2xlarge: 32768
+
+# Mapa VPC -> VRF de NetBox. Evita que IPs repetidas entre cuentas (172.19/172.31)
+# colisionen en la tabla global.
+vpc_vrf_map:
+  vpc-0dde116143de76fc5: "AWS IntegrationHubs-Prod xtrim-integrationhubs-prod-vpc"
+  vpc-016048bbafb16cd96: "AWS IntegrationHub-Dev-Test xtrim-dev-vpc-us-east-1"
+  vpc-0a7cac66e372daad4: "AWS IntegrationHub-Dev-Test xtrim-test-vpc-us-east-1"
+  vpc-00bcf217f3e61005e: "AWS IntegrationHub-Dev-Test aws-controltower-VPC"
+  vpc-0ff1b4885a71b5903: "AWS Grafana-XTRIM xtrim-grafana-observability-vpc-use1"
+  vpc-0cca6013a94e30c73: "AWS NetworkHub xtrim-network-vpc-use1"
+  vpc-0057baf01f1e95fd2: "AWS NetworkHub aws-controltower-VPC"
+  vpc-04f5d353f092cf42c: "AWS DigitalBusiness xtrim-Gestor-Leads-dev"
+  vpc-049989ae2be76b7dd: "AWS DigitalBusiness xtrim-Gestor-Leads-prod"
+  vpc-00a479939de6c8e68: "AWS DigitalBusiness xtrim-web-prod/Xtrim-vpc-prod/Xtrim-vpc-prod"
+  vpc-09c77d7ec6a1bcdf1: "AWS DigitalBusiness xtrim-web-stg/Xtrim-vpc/Xtrim-vpc-stg"
+  vpc-0e80236cb3fe0c343: "AWS DigitalBusiness aws-controltower-VPC"
+  vpc-0c4189fbcf250a859: "AWS ContactCenter"
+
+# Conexion a vCenter (lectura). Credenciales por entorno, no en claro.
+vcenter_hostname: "192.168.21.9"
+vcenter_username: "{{ lookup('env', 'VCENTER_USER') }}"
+vcenter_password: "{{ lookup('env', 'VCENTER_PASS') }}"
+vcenter_validate_certs: false

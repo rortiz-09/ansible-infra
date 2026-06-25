@@ -1,0 +1,78 @@
+---
+# Reconciliacion de bajas para las VMs de origen vCenter.
+# Una VM que ya no esta en vCenter no se elimina de NetBox: se marca offline y se
+# anota quien y cuando la dio de baja. El "quien" se obtiene del log de eventos de
+# vCenter (evento VmRemovedEvent) mediante el helper vcenter_deletions.py.
+
+- name: Consultar eventos de eliminacion en vCenter
+  ansible.builtin.command:
+    cmd: >-
+      {{ playbook_dir }}/../.venv/bin/python {{ playbook_dir }}/../files/vcenter_deletions.py
+      --host {{ vcenter_hostname }} --days 30
+  environment:
+    VCENTER_USER: "{{ vcenter_username }}"
+    VCENTER_PASS: "{{ vcenter_password }}"
+  register: deletions_raw
+  changed_when: false
+
+- name: Cargar mapa de eliminaciones
+  ansible.builtin.set_fact:
+    deletions: "{{ deletions_raw.stdout | from_json }}"
+
+- name: Listar VMs de NetBox con origen vCenter
+  ansible.builtin.uri:
+    url: "{{ netbox_url }}/api/virtualization/virtual-machines/?cf_source=vCenter&limit=1000"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ netbox_token }}"
+      Accept: application/json
+    validate_certs: "{{ netbox_validate_certs }}"
+  register: nb_vc_vms
+
+- name: Marcar offline las VMs ausentes y registrar la baja
+  ansible.builtin.uri:
+    url: "{{ netbox_url }}/api/virtualization/virtual-machines/{{ item.id }}/"
+    method: PATCH
+    headers:
+      Authorization: "Bearer {{ netbox_token }}"
+      Content-Type: application/json
+    body_format: json
+    body:
+      status: offline
+      custom_fields:
+        decommissioned_at: "{{ (deletions[item.name].time | default(discovery_ts)) }}"
+        decommissioned_by: "{{ (deletions[item.name].user | default('desconocido (no hay evento en vCenter)')) }}"
+        source: "vCenter"
+    status_code: [200]
+    validate_certs: "{{ netbox_validate_certs }}"
+  loop: "{{ nb_vc_vms.json.results }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when:
+    - item.name not in live_vm_names
+    - item.status.value != 'offline'
+
+- name: Dejar entrada de historico (Journal) por cada baja
+  ansible.builtin.uri:
+    url: "{{ netbox_url }}/api/extras/journal-entries/"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ netbox_token }}"
+      Content-Type: application/json
+    body_format: json
+    body:
+      assigned_object_type: "virtualization.virtualmachine"
+      assigned_object_id: "{{ item.id }}"
+      kind: "warning"
+      comments: >-
+        Baja detectada en vCenter el {{ deletions[item.name].time | default(discovery_ts) }}
+        por {{ deletions[item.name].user | default('usuario desconocido') }}.
+        El objeto se conserva en NetBox como historico (status offline).
+    status_code: [201]
+    validate_certs: "{{ netbox_validate_certs }}"
+  loop: "{{ nb_vc_vms.json.results }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when:
+    - item.name not in live_vm_names
+    - item.status.value != 'offline'

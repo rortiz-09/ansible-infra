@@ -1,0 +1,135 @@
+---
+# Descubrimiento de una cuenta AWS ({{ acct.name }}).
+# Lectura en AWS, escritura idempotente en NetBox. Las instancias efimeras
+# (autoscaler) no se inventarian; el resto se registra con sus capacidades y
+# metadatos AWS en los custom fields que ya existen en NetBox.
+
+- name: "[{{ acct.name }}] Leer instancias en ejecucion"
+  amazon.aws.ec2_instance_info:
+    profile: "{{ acct.profile }}"
+    region: "{{ aws_region }}"
+    filters:
+      instance-state-name: running
+  register: ec2
+
+- name: "[{{ acct.name }}] Leer subnets"
+  amazon.aws.ec2_vpc_subnet_info:
+    profile: "{{ acct.profile }}"
+    region: "{{ aws_region }}"
+  register: subnets
+
+- name: "[{{ acct.name }}] Prefixes desde subnets"
+  netbox.netbox.netbox_prefix:
+    netbox_url: "{{ netbox_url }}"
+    netbox_token: "{{ netbox_token }}"
+    validate_certs: "{{ netbox_validate_certs }}"
+    data:
+      prefix: "{{ item.cidr_block }}"
+      vrf: "{{ vpc_vrf_map[item.vpc_id] | default(omit) }}"
+      tenant: "{{ acct.tenant }}"
+      status: active
+      description: "{{ item.tags.Name | default('') }}"
+      tags: ["{{ discovered_tag }}"]
+    state: present
+  loop: "{{ subnets.subnets }}"
+  loop_control:
+    label: "{{ item.cidr_block }}"
+
+# La barra de utilizacion nativa de NetBox cuenta las IPs y rangos hijos. Para que
+# refleje el consumo real de EKS (pods y ENIs efimeras) sin registrar cada IP, se
+# crea un IP Range del tamano realmente usado, marcado como utilizado. AWS reserva
+# 5 direcciones por subnet; el rango minimo es de 2 por validacion de NetBox.
+- name: "[{{ acct.name }}] IP Range de uso real para la barra de utilizacion"
+  netbox.netbox.netbox_ip_range:
+    netbox_url: "{{ netbox_url }}"
+    netbox_token: "{{ netbox_token }}"
+    validate_certs: "{{ netbox_validate_certs }}"
+    data:
+      start_address: "{{ netaddr | ansible.utils.ipmath(4) }}/{{ pfxlen }}"
+      end_address: "{{ netaddr | ansible.utils.ipmath(3 + ([inuse | int, 2] | max)) }}/{{ pfxlen }}"
+      vrf: "{{ vpc_vrf_map[item.vpc_id] | default(omit) }}"
+      status: active
+      mark_utilized: true
+      description: "AWS uso real (snapshot): nodos/pods/ENIs"
+      tags: ["{{ discovered_tag }}"]
+    state: present
+  loop: "{{ subnets.subnets }}"
+  loop_control:
+    label: "{{ item.cidr_block }}"
+  vars:
+    pfxlen: "{{ item.cidr_block.split('/')[1] | int }}"
+    netaddr: "{{ item.cidr_block | ansible.utils.ipaddr('network') }}"
+    inuse: "{{ (2 ** (32 - (pfxlen | int))) - 5 - item.available_ip_address_count }}"
+  when: (inuse | int) > 0
+
+- name: "[{{ acct.name }}] Cluster NetBox para las instancias"
+  netbox.netbox.netbox_cluster:
+    netbox_url: "{{ netbox_url }}"
+    netbox_token: "{{ netbox_token }}"
+    validate_certs: "{{ netbox_validate_certs }}"
+    data:
+      name: "{{ acct.tenant }} EC2"
+      cluster_type: "AWS EC2"
+      tenant: "{{ acct.tenant }}"
+    state: present
+
+# Solo se inventarian las instancias persistentes. Las efimeras se omiten para no
+# llenar el CMDB de objetos que se recrean cada dia.
+- name: "[{{ acct.name }}] Maquinas virtuales (instancias persistentes)"
+  netbox.netbox.netbox_virtual_machine:
+    netbox_url: "{{ netbox_url }}"
+    netbox_token: "{{ netbox_token }}"
+    validate_certs: "{{ netbox_validate_certs }}"
+    data:
+      name: "{{ (item.tags.Name | default(item.instance_id)) ~ '-' ~ item.instance_id[-6:] }}"
+      cluster: "{{ acct.tenant }} EC2"
+      status: active
+      tenant: "{{ acct.tenant }}"
+      vcpus: "{{ (item.cpu_options.core_count | int) * (item.cpu_options.threads_per_core | int) }}"
+      memory: "{{ instance_type_mem[item.instance_type] | default(omit) }}"
+      tags: ["{{ discovered_tag }}"]
+      custom_fields:
+        aws_instance_id: "{{ item.instance_id }}"
+        aws_instance_type: "{{ item.instance_type }}"
+        aws_region: "{{ aws_region }}"
+        aws_state: "{{ item.state.name }}"
+        aws_vpc_id: "{{ item.vpc_id }}"
+        aws_subnet_id: "{{ item.subnet_id }}"
+        aws_account_id: "{{ acct.account_id }}"
+        nube: "AWS"
+        ambiente: "{{ acct.ambiente }}"
+        source: "AWS"
+        last_discovered: "{{ discovery_ts }}"
+    state: present
+  loop: "{{ ec2.instances }}"
+  loop_control:
+    label: "{{ item.instance_id }}"
+  when: (item.tags.Name | default('')) is not match(ephemeral_name_pattern)
+
+- name: "[{{ acct.name }}] IPs primarias de las instancias persistentes"
+  netbox.netbox.netbox_ip_address:
+    netbox_url: "{{ netbox_url }}"
+    netbox_token: "{{ netbox_token }}"
+    validate_certs: "{{ netbox_validate_certs }}"
+    data:
+      address: "{{ item.private_ip_address }}/32"
+      vrf: "{{ vpc_vrf_map[item.vpc_id] | default(omit) }}"
+      tenant: "{{ acct.tenant }}"
+      status: active
+      description: "EC2 {{ item.instance_id }} {{ item.instance_type }}"
+      tags: ["{{ discovered_tag }}"]
+    state: present
+  loop: "{{ ec2.instances }}"
+  loop_control:
+    label: "{{ item.instance_id }}"
+  when:
+    - item.private_ip_address is defined
+    - (item.tags.Name | default('')) is not match(ephemeral_name_pattern)
+
+# Reconciliacion de bajas: cualquier VM de esta cuenta que ya no aparezca entre las
+# instancias vivas se marca como offline con fecha de baja. No se elimina, para que
+# quede el historico. Ver tasks/reconcile_absent.yml.
+- name: "[{{ acct.name }}] Marcar instancias ausentes (soft-delete)"
+  ansible.builtin.include_tasks: reconcile_absent.yml
+  vars:
+    live_instance_ids: "{{ ec2.instances | map(attribute='instance_id') | list }}"
