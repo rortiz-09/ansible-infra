@@ -1,0 +1,124 @@
+---
+- name: Audit Linux hardening posture
+  hosts: "{{ target_hosts | default('trusted_linux') }}"
+  gather_facts: true
+  become: true
+  serial: "{{ linux_hardening_serial | default(25) }}"
+
+  vars:
+    linux_hardening_report_root: "{{ lookup('env', 'ANSIBLE_REPORT_ROOT') | default('/ansible/reports', true) }}"
+    linux_hardening_report_dir: "{{ linux_hardening_report_root }}/linux-hardening"
+    linux_hardening_min_score: "{{ hardening_min_score | default(80) }}"
+
+  tasks:
+    - name: Require explicit limit for hardening audit
+      ansible.builtin.assert:
+        that:
+          - ansible_limit is defined
+          - ansible_limit | length > 0
+        fail_msg: "Use --limit, for example --limit XTR-SRV-SFTPGO or --limit linux_test."
+
+    - name: Read sshd effective configuration
+      ansible.builtin.command: sshd -T
+      register: linux_hardening_sshd
+      changed_when: false
+      failed_when: false
+
+    - name: Read selected sysctl values
+      ansible.builtin.command: "sysctl -n {{ item }}"
+      loop:
+        - net.ipv4.ip_forward
+        - net.ipv4.conf.all.accept_redirects
+        - net.ipv4.conf.all.send_redirects
+        - net.ipv4.conf.all.rp_filter
+        - kernel.randomize_va_space
+      register: linux_hardening_sysctl
+      changed_when: false
+      failed_when: false
+
+    - name: Collect service facts
+      ansible.builtin.service_facts:
+
+    - name: Check audit tools
+      ansible.builtin.command: "command -v {{ item }}"
+      loop:
+        - oscap
+        - lynis
+        - usg
+      register: linux_hardening_tools
+      changed_when: false
+      failed_when: false
+
+    - name: Read password policy files
+      ansible.builtin.slurp:
+        path: "{{ item }}"
+      loop:
+        - /etc/login.defs
+        - /etc/security/pwquality.conf
+      register: linux_hardening_policy_files
+      failed_when: false
+
+    - name: Calculate internal hardening score
+      ansible.builtin.set_fact:
+        linux_hardening_checks:
+          ssh_root_login_disabled: "{{ 'permitrootlogin no' in linux_hardening_sshd.stdout }}"
+          ssh_password_auth_disabled: "{{ 'passwordauthentication no' in linux_hardening_sshd.stdout }}"
+          ssh_empty_passwords_disabled: "{{ 'permitemptypasswords no' in linux_hardening_sshd.stdout }}"
+          ssh_x11_forwarding_disabled: "{{ 'x11forwarding no' in linux_hardening_sshd.stdout }}"
+          auditd_running: "{{ (ansible_facts.services['auditd.service'].state | default('')) == 'running' }}"
+          chrony_or_timesync_running: >-
+            {{
+              (ansible_facts.services['chronyd.service'].state | default('')) == 'running'
+              or (ansible_facts.services['systemd-timesyncd.service'].state | default('')) == 'running'
+            }}
+          firewall_running: >-
+            {{
+              (ansible_facts.services['firewalld.service'].state | default('')) == 'running'
+              or (ansible_facts.services['ufw.service'].state | default('')) == 'running'
+            }}
+          ipv4_forwarding_disabled: "{{ (linux_hardening_sysctl.results | selectattr('item', 'equalto', 'net.ipv4.ip_forward') | map(attribute='stdout') | first | default('1')) == '0' }}"
+          redirects_disabled: "{{ (linux_hardening_sysctl.results | selectattr('item', 'equalto', 'net.ipv4.conf.all.accept_redirects') | map(attribute='stdout') | first | default('1')) == '0' }}"
+          aslr_enabled: "{{ (linux_hardening_sysctl.results | selectattr('item', 'equalto', 'kernel.randomize_va_space') | map(attribute='stdout') | first | default('0')) in ['1', '2'] }}"
+          openscap_available: "{{ (linux_hardening_tools.results | selectattr('item', 'equalto', 'oscap') | map(attribute='rc') | first | default(1)) == 0 }}"
+          lynis_available: "{{ (linux_hardening_tools.results | selectattr('item', 'equalto', 'lynis') | map(attribute='rc') | first | default(1)) == 0 }}"
+
+    - name: Build score value
+      ansible.builtin.set_fact:
+        linux_hardening_score: "{{ (linux_hardening_checks | dict2items | selectattr('value', 'equalto', true) | list | length * 100 / (linux_hardening_checks | length)) | round(0, 'floor') | int }}"
+
+    - name: Ensure local hardening report directory exists
+      ansible.builtin.file:
+        path: "{{ linux_hardening_report_dir }}"
+        state: directory
+        mode: "0750"
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: Write hardening audit JSON
+      ansible.builtin.copy:
+        dest: "{{ linux_hardening_report_dir }}/{{ inventory_hostname }}-audit.json"
+        mode: "0640"
+        content: |
+          {{
+            {
+              "host": inventory_hostname,
+              "distribution": ansible_facts.distribution,
+              "version": ansible_facts.distribution_version,
+              "kernel": ansible_facts.kernel,
+              "score": linux_hardening_score,
+              "target_score": linux_hardening_min_score | int,
+              "checks": linux_hardening_checks
+            } | to_nice_json
+          }}
+      delegate_to: localhost
+      become: false
+
+    - name: Show hardening audit score
+      ansible.builtin.debug:
+        msg:
+          host: "{{ inventory_hostname }}"
+          os: "{{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}"
+          score: "{{ linux_hardening_score }}"
+          target: "{{ linux_hardening_min_score }}"
+          report: "{{ linux_hardening_report_dir }}/{{ inventory_hostname }}-audit.json"

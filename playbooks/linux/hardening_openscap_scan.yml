@@ -1,0 +1,83 @@
+---
+- name: Run OpenSCAP compliance scan when available
+  hosts: "{{ target_hosts | default('trusted_linux') }}"
+  gather_facts: true
+  become: true
+  serial: "{{ linux_hardening_serial | default(10) }}"
+
+  vars:
+    linux_hardening_report_root: "{{ lookup('env', 'ANSIBLE_REPORT_ROOT') | default('/ansible/reports', true) }}"
+    linux_hardening_report_dir: "{{ linux_hardening_report_root }}/linux-hardening"
+    openscap_profile_by_family:
+      RedHat:
+        "10": "xccdf_org.ssgproject.content_profile_cis"
+        "9": "xccdf_org.ssgproject.content_profile_cis"
+        "8": "xccdf_org.ssgproject.content_profile_cis"
+        "7": "xccdf_org.ssgproject.content_profile_standard"
+      Debian:
+        "24": "xccdf_org.ssgproject.content_profile_standard"
+        "22": "xccdf_org.ssgproject.content_profile_standard"
+        "20": "xccdf_org.ssgproject.content_profile_standard"
+
+  tasks:
+    - name: Require explicit limit for OpenSCAP scan
+      ansible.builtin.assert:
+        that:
+          - ansible_limit is defined
+          - ansible_limit | length > 0
+        fail_msg: "Use --limit for OpenSCAP scan."
+
+    - name: Check oscap command
+      ansible.builtin.command: command -v oscap
+      register: oscap_command
+      changed_when: false
+      failed_when: false
+
+    - name: Find SCAP datastreams
+      ansible.builtin.find:
+        paths:
+          - /usr/share/xml/scap/ssg/content
+          - /usr/share/xml/scap/ssg
+        patterns: "ssg-*-ds.xml"
+        recurse: true
+      register: oscap_datastreams
+      when: oscap_command.rc == 0
+
+    - name: Ensure local OpenSCAP report directory exists
+      ansible.builtin.file:
+        path: "{{ linux_hardening_report_dir }}"
+        state: directory
+        mode: "0750"
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: Run OpenSCAP scan
+      ansible.builtin.command: >-
+        oscap xccdf eval
+        --profile {{ openscap_profile | default(openscap_profile_by_family.get(ansible_facts.os_family, {}).get(ansible_facts.distribution_major_version | string, 'xccdf_org.ssgproject.content_profile_standard')) }}
+        --results /tmp/{{ inventory_hostname }}-openscap-results.xml
+        --report /tmp/{{ inventory_hostname }}-openscap-report.html
+        {{ oscap_datastreams.files[0].path }}
+      register: oscap_scan
+      changed_when: false
+      failed_when: oscap_scan.rc not in [0, 2]
+      when:
+        - oscap_command.rc == 0
+        - oscap_datastreams.matched | default(0) | int > 0
+
+    - name: Fetch OpenSCAP HTML report
+      ansible.builtin.fetch:
+        src: "/tmp/{{ inventory_hostname }}-openscap-report.html"
+        dest: "{{ linux_hardening_report_dir }}/{{ inventory_hostname }}-openscap-report.html"
+        flat: true
+      when: oscap_scan is not skipped
+
+    - name: Show OpenSCAP result
+      ansible.builtin.debug:
+        msg:
+          host: "{{ inventory_hostname }}"
+          oscap_available: "{{ oscap_command.rc == 0 }}"
+          datastreams_found: "{{ oscap_datastreams.matched | default(0) }}"
+          rc: "{{ oscap_scan.rc | default('not_run') }}"
+          report: "{{ linux_hardening_report_dir }}/{{ inventory_hostname }}-openscap-report.html"

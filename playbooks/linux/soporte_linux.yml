@@ -1,0 +1,63 @@
+---
+- name: Linux operations console
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    linux_console_project_dir: "{{ lookup('env', 'ANSIBLE_PROJECT_DIR') | default('/ansible/projects/ansible-infra', true) }}"
+    linux_console_inventory: "{{ lookup('env', 'ANSIBLE_LINUX_INVENTORY') | default('/ansible/projects/ansible-infra/generated/trusted_linux.ini', true) }}"
+
+  tasks:
+    - name: Ask target limit
+      ansible.builtin.pause:
+        prompt: "Ingrese --limit objetivo, por ejemplo XTR-SRV-SFTPGO o grupo linux_test"
+      register: linux_console_limit_prompt
+      when: linux_console_limit is not defined
+
+    - name: Ask Linux operation
+      ansible.builtin.pause:
+        prompt: "Accion: 1=discovery, 2=audit, 3=install_tools, 4=openscap, 5=apply_safe, 6=resources"
+      register: linux_console_action_prompt
+      when: linux_console_action is not defined
+
+    - name: Normalize console values
+      ansible.builtin.set_fact:
+        linux_console_limit_effective: "{{ (linux_console_limit | default(linux_console_limit_prompt.user_input)) | trim }}"
+        linux_console_action_effective: "{{ (linux_console_action | default(linux_console_action_prompt.user_input)) | trim | lower }}"
+
+    - name: Validate console input
+      ansible.builtin.assert:
+        that:
+          - linux_console_limit_effective | length > 0
+          - linux_console_action_effective in ['1', '2', '3', '4', '5', '6', 'discovery', 'audit', 'install_tools', 'openscap', 'apply_safe', 'resources']
+        fail_msg: "Accion invalida o limit vacio."
+
+    - name: Map action to playbook
+      ansible.builtin.set_fact:
+        linux_console_playbook: >-
+          {% if linux_console_action_effective in ['1', 'discovery'] %}playbooks/linux/hardening_fleet_discovery.yml
+          {% elif linux_console_action_effective in ['2', 'audit'] %}playbooks/linux/hardening_audit.yml
+          {% elif linux_console_action_effective in ['3', 'install_tools'] %}playbooks/linux/hardening_tools.yml -e install_hardening_tools=true
+          {% elif linux_console_action_effective in ['4', 'openscap'] %}playbooks/linux/hardening_openscap_scan.yml
+          {% elif linux_console_action_effective in ['5', 'apply_safe'] %}playbooks/linux/hardening_apply_safe.yml -e apply_hardening=true
+          {% elif linux_console_action_effective in ['6', 'resources'] %}playbooks/linux/resource_provisioning.yml
+          {% endif %}
+
+    - name: Execute selected Linux operation
+      ansible.builtin.command:
+        cmd: >-
+          ansible-playbook
+          -i {{ linux_console_inventory }}
+          {{ linux_console_playbook | trim }}
+          --limit {{ linux_console_limit_effective }}
+        chdir: "{{ linux_console_project_dir }}"
+      environment:
+        ANSIBLE_LOG_PATH: /dev/null
+        ANSIBLE_STDOUT_CALLBACK: default
+      register: linux_console_run
+      changed_when: linux_console_action_effective in ['3', '5', 'install_tools', 'apply_safe']
+
+    - name: Show operation output
+      ansible.builtin.debug:
+        msg: "{{ linux_console_run.stdout_lines }}"

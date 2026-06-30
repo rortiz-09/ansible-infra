@@ -1,0 +1,71 @@
+---
+- name: Audit and optionally grow Linux filesystem resources
+  hosts: "{{ target_hosts | default('trusted_linux') }}"
+  gather_facts: true
+  become: true
+  serial: "{{ linux_resource_serial | default(10) }}"
+
+  vars:
+    linux_resource_apply: "{{ apply_resource_change | default(false) | bool }}"
+    linux_resource_mount: "{{ resource_mount | default('/') }}"
+    linux_resource_report_root: "{{ lookup('env', 'ANSIBLE_REPORT_ROOT') | default('/ansible/reports', true) }}"
+    linux_resource_report_dir: "{{ linux_resource_report_root }}/linux-resources"
+
+  tasks:
+    - name: Require explicit limit
+      ansible.builtin.assert:
+        that:
+          - ansible_limit is defined
+          - ansible_limit | length > 0
+        fail_msg: "Use --limit for resource audit or resize."
+
+    - name: Select target mount facts
+      ansible.builtin.set_fact:
+        linux_resource_mount_fact: "{{ ansible_facts.mounts | selectattr('mount', 'equalto', linux_resource_mount) | first | default({}) }}"
+
+    - name: Ensure local resource report directory exists
+      ansible.builtin.file:
+        path: "{{ linux_resource_report_dir }}"
+        state: directory
+        mode: "0750"
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: Write resource audit report
+      ansible.builtin.copy:
+        dest: "{{ linux_resource_report_dir }}/{{ inventory_hostname }}-resources.json"
+        mode: "0640"
+        content: |
+          {{
+            {
+              "host": inventory_hostname,
+              "mount": linux_resource_mount,
+              "mount_fact": linux_resource_mount_fact,
+              "all_mounts": ansible_facts.mounts
+            } | to_nice_json
+          }}
+      delegate_to: localhost
+      become: false
+
+    - name: Grow XFS filesystem when explicitly approved
+      ansible.builtin.command: "xfs_growfs {{ linux_resource_mount }}"
+      when:
+        - linux_resource_apply
+        - linux_resource_mount_fact.fstype | default('') == 'xfs'
+      changed_when: true
+
+    - name: Grow ext filesystem when explicitly approved
+      ansible.builtin.command: "resize2fs {{ linux_resource_mount_fact.device }}"
+      when:
+        - linux_resource_apply
+        - linux_resource_mount_fact.fstype | default('') in ['ext3', 'ext4']
+      changed_when: true
+
+    - name: Show resource result
+      ansible.builtin.debug:
+        msg:
+          host: "{{ inventory_hostname }}"
+          mount: "{{ linux_resource_mount }}"
+          apply: "{{ linux_resource_apply }}"
+          report: "{{ linux_resource_report_dir }}/{{ inventory_hostname }}-resources.json"

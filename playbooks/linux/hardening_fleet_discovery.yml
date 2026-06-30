@@ -1,0 +1,71 @@
+---
+- name: Discover Linux distro and hardening family
+  hosts: "{{ target_hosts | default('trusted_linux') }}"
+  gather_facts: true
+  become: false
+  serial: "{{ linux_hardening_serial | default(40) }}"
+
+  vars:
+    linux_hardening_report_root: "{{ lookup('env', 'ANSIBLE_REPORT_ROOT') | default('/ansible/reports', true) }}"
+    linux_hardening_report_dir: "{{ linux_hardening_report_root }}/linux-hardening"
+
+  tasks:
+    - name: Require explicit limit for fleet discovery
+      ansible.builtin.assert:
+        that:
+          - ansible_limit is defined
+          - ansible_limit | length > 0
+        fail_msg: "Use --limit to avoid scanning the full Linux fleet accidentally."
+
+    - name: Classify Linux hardening family
+      ansible.builtin.set_fact:
+        linux_hardening_family: >-
+          {% set dist = ansible_facts.distribution | lower %}
+          {% set major = ansible_facts.distribution_major_version | string %}
+          {% if dist in ['redhat', 'red hat enterprise linux'] and major == '10' %}rhel10
+          {% elif dist in ['redhat', 'red hat enterprise linux'] and major == '9' %}rhel9
+          {% elif dist in ['redhat', 'red hat enterprise linux'] and major == '8' %}rhel8
+          {% elif dist in ['redhat', 'red hat enterprise linux'] and major == '7' %}rhel7
+          {% elif dist in ['oraclelinux', 'oracle linux'] and major == '8' %}oracle8
+          {% elif dist in ['oraclelinux', 'oracle linux'] and major == '7' %}oracle7
+          {% elif dist == 'rocky' and major == '8' %}rocky8
+          {% elif dist == 'centos' and major == '7' %}centos7
+          {% elif dist == 'ubuntu' and ansible_facts.distribution_version is version('24.04', '>=') %}ubuntu24
+          {% elif dist == 'ubuntu' and ansible_facts.distribution_version is version('22.04', '>=') %}ubuntu22
+          {% elif dist == 'ubuntu' and ansible_facts.distribution_version is version('20.04', '>=') %}ubuntu20
+          {% elif dist == 'debian' %}debian
+          {% elif dist == 'sangoma' %}sangoma7
+          {% else %}generic
+          {% endif %}
+
+    - name: Build discovery row
+      ansible.builtin.set_fact:
+        linux_hardening_discovery_row:
+          host: "{{ inventory_hostname }}"
+          ansible_host: "{{ ansible_host | default('') }}"
+          distribution: "{{ ansible_facts.distribution }}"
+          version: "{{ ansible_facts.distribution_version }}"
+          major: "{{ ansible_facts.distribution_major_version }}"
+          family: "{{ linux_hardening_family | trim }}"
+          kernel: "{{ ansible_facts.kernel }}"
+          virtualization_role: "{{ ansible_facts.virtualization_role | default('') }}"
+          virtualization_type: "{{ ansible_facts.virtualization_type | default('') }}"
+
+    - name: Ensure local hardening report directory exists
+      ansible.builtin.file:
+        path: "{{ linux_hardening_report_dir }}"
+        state: directory
+        mode: "0750"
+      delegate_to: localhost
+      run_once: true
+
+    - name: Write per-host discovery JSON
+      ansible.builtin.copy:
+        dest: "{{ linux_hardening_report_dir }}/{{ inventory_hostname }}-discovery.json"
+        mode: "0640"
+        content: "{{ linux_hardening_discovery_row | to_nice_json }}\n"
+      delegate_to: localhost
+
+    - name: Show hardening family
+      ansible.builtin.debug:
+        msg: "{{ linux_hardening_discovery_row }}"

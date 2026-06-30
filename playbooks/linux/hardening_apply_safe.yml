@@ -1,0 +1,142 @@
+---
+- name: Apply safe Linux hardening baseline
+  hosts: "{{ target_hosts | default('trusted_linux') }}"
+  gather_facts: true
+  become: true
+  serial: "{{ linux_hardening_serial | default(10) }}"
+
+  vars:
+    linux_hardening_apply: "{{ apply_hardening | default(false) | bool }}"
+    linux_hardening_disable_password_ssh: "{{ disable_password_ssh | default(false) | bool }}"
+    linux_hardening_enable_firewall: "{{ enable_firewall | default(false) | bool }}"
+    linux_hardening_sshd_file: /etc/ssh/sshd_config
+    linux_hardening_sysctl_file: /etc/sysctl.d/90-xtrim-hardening.conf
+
+  handlers:
+    - name: Restart sshd
+      ansible.builtin.service:
+        name: "{{ 'ssh' if ansible_facts.os_family == 'Debian' else 'sshd' }}"
+        state: restarted
+
+    - name: Reload sysctl
+      ansible.builtin.command: "sysctl --system"
+      changed_when: true
+
+  tasks:
+    - name: Require explicit approval and limit
+      ansible.builtin.assert:
+        that:
+          - ansible_limit is defined
+          - ansible_limit | length > 0
+          - linux_hardening_apply
+        fail_msg: "Use --limit and -e apply_hardening=true. Start in test/dev before production."
+
+    - name: Create hardening backup directory
+      ansible.builtin.file:
+        path: /var/backups/xtrim-hardening
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Backup sshd_config before changes
+      ansible.builtin.copy:
+        src: "{{ linux_hardening_sshd_file }}"
+        dest: "/var/backups/xtrim-hardening/sshd_config.{{ ansible_date_time.iso8601_basic_short }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0600"
+      failed_when: false
+
+    - name: Ensure root SSH login is disabled
+      ansible.builtin.lineinfile:
+        path: "{{ linux_hardening_sshd_file }}"
+        regexp: '^\s*#?\s*PermitRootLogin\s+'
+        line: "PermitRootLogin no"
+        validate: "sshd -t -f %s"
+      notify: Restart sshd
+
+    - name: Ensure empty SSH passwords are disabled
+      ansible.builtin.lineinfile:
+        path: "{{ linux_hardening_sshd_file }}"
+        regexp: '^\s*#?\s*PermitEmptyPasswords\s+'
+        line: "PermitEmptyPasswords no"
+        validate: "sshd -t -f %s"
+      notify: Restart sshd
+
+    - name: Ensure SSH X11 forwarding is disabled
+      ansible.builtin.lineinfile:
+        path: "{{ linux_hardening_sshd_file }}"
+        regexp: '^\s*#?\s*X11Forwarding\s+'
+        line: "X11Forwarding no"
+        validate: "sshd -t -f %s"
+      notify: Restart sshd
+
+    - name: Optionally disable SSH password authentication
+      ansible.builtin.lineinfile:
+        path: "{{ linux_hardening_sshd_file }}"
+        regexp: '^\s*#?\s*PasswordAuthentication\s+'
+        line: "PasswordAuthentication no"
+        validate: "sshd -t -f %s"
+      notify: Restart sshd
+      when: linux_hardening_disable_password_ssh
+
+    - name: Configure safe network sysctl baseline
+      ansible.builtin.copy:
+        dest: "{{ linux_hardening_sysctl_file }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by Ansible. Conservative baseline for servers.
+          net.ipv4.ip_forward = 0
+          net.ipv4.conf.all.accept_redirects = 0
+          net.ipv4.conf.default.accept_redirects = 0
+          net.ipv4.conf.all.send_redirects = 0
+          net.ipv4.conf.default.send_redirects = 0
+          net.ipv4.conf.all.rp_filter = 1
+          net.ipv4.conf.default.rp_filter = 1
+          net.ipv4.icmp_echo_ignore_broadcasts = 1
+          net.ipv4.conf.all.log_martians = 1
+          kernel.randomize_va_space = 2
+      notify: Reload sysctl
+
+    - name: Ensure audit service is enabled
+      ansible.builtin.service:
+        name: "{{ 'auditd' if ansible_facts.os_family == 'Debian' else 'auditd' }}"
+        enabled: true
+        state: started
+      failed_when: false
+
+    - name: Ensure chrony is enabled
+      ansible.builtin.service:
+        name: chronyd
+        enabled: true
+        state: started
+      failed_when: false
+      when: ansible_facts.os_family == 'RedHat'
+
+    - name: Ensure chrony is enabled on Debian family
+      ansible.builtin.service:
+        name: chrony
+        enabled: true
+        state: started
+      failed_when: false
+      when: ansible_facts.os_family == 'Debian'
+
+    - name: Optionally enable firewalld
+      ansible.builtin.service:
+        name: firewalld
+        enabled: true
+        state: started
+      when:
+        - linux_hardening_enable_firewall
+        - ansible_facts.os_family == 'RedHat'
+
+    - name: Optionally enable ufw
+      community.general.ufw:
+        state: enabled
+      when:
+        - linux_hardening_enable_firewall
+        - ansible_facts.os_family == 'Debian'
