@@ -1,0 +1,358 @@
+---
+- name: Issue internal TLS certificate package from AD CS
+  hosts: "{{ target_hosts | default('xtrimad_cs') }}"
+  gather_facts: false
+
+  vars:
+    cert_dry_run: true
+    cert_common_name: "api-dev.xtrim.com.ec"
+    cert_dns_names:
+      - "api-dev.xtrim.com.ec"
+    cert_friendly_name: "{{ cert_common_name | regex_replace('[^A-Za-z0-9]+', '-') | regex_replace('^-|-$', '') | lower }}"
+    cert_validate_dns: true
+    cert_template: "WebServer"
+    cert_ca_config: "xtrimad-cs.grupotvcable.com\\XTRIM-Root-CA"
+    cert_validity_years: 20
+    cert_manage_template_validity: true
+    cert_output_root: "C:\\ProgramData\\Ansible\\certs"
+    cert_package_year: "{{ lookup('pipe', 'date +%Y') }}"
+    cert_pfx_password: ""
+
+  tasks:
+    - name: Validate requested certificate variables
+      ansible.builtin.assert:
+        that:
+          - cert_common_name | length > 0
+          - cert_dns_names | length > 0
+          - cert_common_name in cert_dns_names
+          - cert_validity_years | int >= 1
+        fail_msg: "Define cert_common_name, include it in cert_dns_names, and set cert_validity_years to at least 1."
+
+    - name: Show requested operation
+      ansible.builtin.debug:
+        msg:
+          - "Target AD CS host: {{ inventory_hostname }}"
+          - "CN: {{ cert_common_name }}"
+          - "SAN: {{ cert_dns_names | join(', ') }}"
+          - "Template: {{ cert_template }}"
+          - "Requested validity: {{ cert_validity_years }} years"
+          - "Dry run: {{ cert_dry_run }}"
+          - "Output root: {{ cert_output_root }}"
+
+    - name: Validate CA service and DNS without issuing certificate
+      win_shell: |
+          $ErrorActionPreference = 'Stop'
+          $CAConfig = {{ cert_ca_config | to_json }}
+          $CAConfig = $CAConfig -replace '\\\\', '\'
+          $DnsNames = @({% for name in cert_dns_names %}{{ name | to_json }}{% if not loop.last %}, {% endif %}{% endfor %})
+          $ValidateDns = [System.Convert]::ToBoolean('{{ cert_validate_dns | bool }}')
+
+          $svc = Get-Service CertSvc -ErrorAction Stop
+          if ($svc.Status -ne 'Running') {
+            throw "CertSvc no esta Running. Estado actual: $($svc.Status)"
+          }
+
+          & certutil -config $CAConfig -ping | Out-Host
+          if ($LASTEXITCODE -ne 0) {
+            throw "La CA no respondio correctamente. ExitCode=$LASTEXITCODE"
+          }
+
+          if ($ValidateDns) {
+            foreach ($name in $DnsNames) {
+              if ($name -like '*`**') {
+                Write-Host "Omitiendo validacion DNS de wildcard: $name"
+                continue
+              }
+
+              Write-Host "Validando DNS: $name"
+              Resolve-DnsName $name -ErrorAction Stop | Select-Object Name,IPAddress,Type | Format-Table -AutoSize
+            }
+          }
+
+          [pscustomobject]@{
+            CertSvc = $svc.Status.ToString()
+            CAConfig = $CAConfig
+            DnsChecked = $ValidateDns
+          }
+      changed_when: false
+
+    - name: Simulate certificate package creation
+      win_shell: |
+          $ErrorActionPreference = 'Stop'
+          $CommonName = {{ cert_common_name | to_json }}
+          $DnsNames = @({% for name in cert_dns_names %}{{ name | to_json }}{% if not loop.last %}, {% endif %}{% endfor %})
+          $FriendlyName = {{ cert_friendly_name | to_json }}
+          $OutputRoot = {{ cert_output_root | to_json }}
+          $PackageYear = {{ cert_package_year | to_json }}
+          $Template = {{ cert_template | to_json }}
+          $ValidityYears = {{ cert_validity_years | int }}
+          $ManageTemplateValidity = [System.Convert]::ToBoolean('{{ cert_manage_template_validity | bool }}')
+
+          $outDir = Join-Path $OutputRoot $FriendlyName
+          $packageDir = Join-Path $outDir "$FriendlyName-$PackageYear-package"
+          $zipPath = Join-Path $outDir "$FriendlyName-$PackageYear.zip"
+
+          [pscustomobject]@{
+            Mode = 'dry-run'
+            WouldCreateDirectory = $packageDir
+            WouldCreateZip = $zipPath
+            WouldIssueCN = $CommonName
+            WouldIssueSAN = ($DnsNames -join ', ')
+            WouldUseTemplate = $Template
+            WouldRequestValidityYears = $ValidityYears
+            WouldTemporarilyChangeTemplateValidity = $ManageTemplateValidity
+            WouldCreateFiles = @(
+              "$FriendlyName-$PackageYear.crt",
+              "$FriendlyName-$PackageYear.fullchain.pem",
+              "$FriendlyName-$PackageYear.key",
+              "$FriendlyName-$PackageYear.pfx",
+              "$FriendlyName-$PackageYear.pfx.pass",
+              "xtrim-root-ca.pem"
+            ) -join ', '
+          }
+      changed_when: false
+      when: cert_dry_run | bool
+
+    - name: Issue certificate and build package
+      win_shell: |
+          $ErrorActionPreference = 'Stop'
+          $CommonName = {{ cert_common_name | to_json }}
+          $DnsNames = @({% for name in cert_dns_names %}{{ name | to_json }}{% if not loop.last %}, {% endif %}{% endfor %})
+          $FriendlyName = {{ cert_friendly_name | to_json }}
+          $CAConfig = {{ cert_ca_config | to_json }}
+          $CAConfig = $CAConfig -replace '\\\\', '\'
+          $Template = {{ cert_template | to_json }}
+          $ValidityYears = {{ cert_validity_years | int }}
+          $ManageTemplateValidity = [System.Convert]::ToBoolean('{{ cert_manage_template_validity | bool }}')
+          $OutputRoot = {{ cert_output_root | to_json }}
+          $PackageYear = {{ cert_package_year | to_json }}
+          $ProvidedPfxPassword = {{ cert_pfx_password | to_json }}
+
+          function Step($Message) {
+            Write-Host "[ADCS] $Message"
+          }
+
+          function Assert-ExitCode($Message) {
+            if ($LASTEXITCODE -ne 0) {
+              throw "$Message. ExitCode=$LASTEXITCODE"
+            }
+          }
+
+          function New-RandomPassword {
+            $bytes = New-Object byte[] 24
+            [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+            return [Convert]::ToBase64String($bytes)
+          }
+
+          function Convert-YearsToPkiExpirationPeriodBytes([int]$Years) {
+            $ticks = -([TimeSpan]::FromDays(365 * $Years).Ticks)
+            return [BitConverter]::GetBytes([Int64]$ticks)
+          }
+
+          function Get-CertificateTemplateEntry([string]$TemplateName) {
+            $rootDse = [ADSI]'LDAP://RootDSE'
+            $configNc = [string]$rootDse.configurationNamingContext
+            $templateDn = "CN=$TemplateName,CN=Certificate Templates,CN=Public Key Services,CN=Services,$configNc"
+            return [ADSI]"LDAP://$templateDn"
+          }
+
+          function Set-CertificateTemplateValidity([string]$TemplateName, [int]$Years) {
+            $entry = Get-CertificateTemplateEntry $TemplateName
+            $original = $null
+            if ($entry.Properties['pKIExpirationPeriod'].Value) {
+              $original = [byte[]]$entry.Properties['pKIExpirationPeriod'].Value
+            }
+
+            $newValue = Convert-YearsToPkiExpirationPeriodBytes $Years
+            $templateDn = [string]$entry.Properties['distinguishedName'].Value
+
+            try {
+              Import-Module ActiveDirectory -ErrorAction Stop
+              Set-ADObject -Identity $templateDn -Replace @{ pKIExpirationPeriod = $newValue } -ErrorAction Stop
+            } catch {
+              $entry.Put('pKIExpirationPeriod', $newValue)
+              $entry.SetInfo()
+            }
+
+            return $original
+          }
+
+          function Restore-CertificateTemplateValidity([string]$TemplateName, [byte[]]$OriginalValue) {
+            if (-not $OriginalValue) {
+              Write-Warning "No se restauro pKIExpirationPeriod de $TemplateName porque no habia valor original capturado."
+              return
+            }
+
+            $entry = Get-CertificateTemplateEntry $TemplateName
+            $templateDn = [string]$entry.Properties['distinguishedName'].Value
+
+            try {
+              Import-Module ActiveDirectory -ErrorAction Stop
+              Set-ADObject -Identity $templateDn -Replace @{ pKIExpirationPeriod = $OriginalValue } -ErrorAction Stop
+            } catch {
+              $entry.Put('pKIExpirationPeriod', $OriginalValue)
+              $entry.SetInfo()
+            }
+          }
+
+          function Write-PemFileFromBytes([byte[]]$Bytes, [string]$Label, [string]$Path) {
+            $base64 = [Convert]::ToBase64String($Bytes)
+            $lines = New-Object System.Collections.Generic.List[string]
+            $lines.Add("-----BEGIN $Label-----")
+            for ($i = 0; $i -lt $base64.Length; $i += 64) {
+              $length = [Math]::Min(64, $base64.Length - $i)
+              $lines.Add($base64.Substring($i, $length))
+            }
+            $lines.Add("-----END $Label-----")
+            $lines | Set-Content -Path $Path -Encoding ascii
+          }
+
+          function Get-PrivateKeyPkcs8Bytes($Certificate) {
+            $rsa = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($Certificate)
+            if (-not $rsa) {
+              throw "No se pudo obtener llave privada RSA exportable del certificado."
+            }
+            return $rsa.ExportPkcs8PrivateKey()
+          }
+
+          $outDir = Join-Path $OutputRoot $FriendlyName
+          $packageDir = Join-Path $outDir "$FriendlyName-$PackageYear-package"
+          $zipPath = Join-Path $outDir "$FriendlyName-$PackageYear.zip"
+          $infPath = Join-Path $outDir "$FriendlyName.inf"
+          $reqPath = Join-Path $outDir "$FriendlyName.req"
+          $cerPath = Join-Path $outDir "$FriendlyName.cer"
+          $dumpPath = Join-Path $outDir "$FriendlyName.dump.txt"
+          $pfxPath = Join-Path $packageDir "$FriendlyName-$PackageYear.pfx"
+          $pfxPassPath = Join-Path $packageDir "$FriendlyName-$PackageYear.pfx.pass"
+          $crtPath = Join-Path $packageDir "$FriendlyName-$PackageYear.crt"
+          $keyPath = Join-Path $packageDir "$FriendlyName-$PackageYear.key"
+          $rootCerPath = Join-Path $outDir "XTRIM-Root-CA.cer"
+          $rootPemPath = Join-Path $packageDir "xtrim-root-ca.pem"
+          $fullchainPath = Join-Path $packageDir "$FriendlyName-$PackageYear.fullchain.pem"
+
+          New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+          if (Test-Path $packageDir) {
+            Remove-Item -LiteralPath $packageDir -Recurse -Force
+          }
+          New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
+
+          $templateOriginalValidity = $null
+          $templateChanged = $false
+
+          try {
+            if ($ManageTemplateValidity) {
+              Step "Cambiando temporalmente vigencia de plantilla $Template a $ValidityYears anios"
+              $templateOriginalValidity = Set-CertificateTemplateValidity -TemplateName $Template -Years $ValidityYears
+              $templateChanged = $true
+            }
+
+            $sanLine = "dns=" + ($DnsNames -join "&dns=")
+            $infLines = @(
+              '[Version]',
+              'Signature="$Windows NT$"',
+              '',
+              '[NewRequest]',
+              "Subject = `"CN=$CommonName`"",
+              'KeySpec = 1',
+              'KeyLength = 2048',
+              'Exportable = TRUE',
+              'MachineKeySet = TRUE',
+              'SMIME = FALSE',
+              'PrivateKeyArchive = FALSE',
+              'UserProtected = FALSE',
+              'UseExistingKeySet = FALSE',
+              'ProviderName = "Microsoft RSA SChannel Cryptographic Provider"',
+              'ProviderType = 12',
+              'RequestType = PKCS10',
+              'KeyUsage = 0xa0',
+              '',
+              '[Extensions]',
+              '2.5.29.17 = "{text}"',
+              "_continue_ = `"$sanLine`"",
+              '',
+              '[RequestAttributes]',
+              "CertificateTemplate = $Template"
+            )
+
+            $infLines | Set-Content -Path $infPath -Encoding ascii
+
+            Step "Generando request"
+            & certreq -new $infPath $reqPath
+            Assert-ExitCode "No se pudo generar el request"
+
+            Step "Enviando request a AD CS"
+            & certreq -submit -config $CAConfig $reqPath $cerPath
+            Assert-ExitCode "No se pudo emitir el certificado"
+
+            Step "Aceptando certificado en LocalMachine\My"
+            & certreq -accept $cerPath
+            Assert-ExitCode "No se pudo aceptar el certificado"
+          }
+          finally {
+            if ($templateChanged) {
+              Step "Restaurando vigencia original de plantilla $Template"
+              Restore-CertificateTemplateValidity -TemplateName $Template -OriginalValue $templateOriginalValidity
+            }
+          }
+
+          $cert = Get-ChildItem Cert:\LocalMachine\My |
+            Where-Object { $_.Subject -eq "CN=$CommonName" -and $_.HasPrivateKey } |
+            Sort-Object NotAfter -Descending |
+            Select-Object -First 1
+
+          if (-not $cert) {
+            throw "No se encontro el certificado emitido con llave privada para CN=$CommonName"
+          }
+
+          $pfxPassword = $ProvidedPfxPassword
+          if ([string]::IsNullOrWhiteSpace($pfxPassword)) {
+            $pfxPassword = New-RandomPassword
+          }
+
+          $securePfxPassword = ConvertTo-SecureString $pfxPassword -AsPlainText -Force
+
+          Step "Exportando PFX"
+          Export-PfxCertificate -Cert $cert -FilePath $pfxPath -Password $securePfxPassword | Out-Host
+          $pfxPassword | Set-Content -Path $pfxPassPath -Encoding ascii
+
+          Step "Exportando CRT y KEY en PEM"
+          Write-PemFileFromBytes -Bytes $cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert) -Label "CERTIFICATE" -Path $crtPath
+          Write-PemFileFromBytes -Bytes (Get-PrivateKeyPkcs8Bytes $cert) -Label "PRIVATE KEY" -Path $keyPath
+
+          Step "Exportando raiz de la CA"
+          & certutil -ca.cert $rootCerPath
+          Assert-ExitCode "No se pudo exportar el certificado raiz"
+          $rootCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($rootCerPath)
+          Write-PemFileFromBytes -Bytes $rootCert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert) -Label "CERTIFICATE" -Path $rootPemPath
+
+          Step "Creando fullchain"
+          Get-Content -Path $crtPath, $rootPemPath | Set-Content -Path $fullchainPath -Encoding ascii
+
+          Step "Generando dump"
+          & certutil -dump $cerPath | Out-File -FilePath $dumpPath -Encoding utf8
+
+          Step "Creando ZIP"
+          if (Test-Path $zipPath) {
+            Remove-Item -LiteralPath $zipPath -Force
+          }
+          Compress-Archive -Path (Join-Path $packageDir "*") -DestinationPath $zipPath -Force
+
+          [pscustomobject]@{
+            Subject = $cert.Subject
+            Thumbprint = $cert.Thumbprint
+            NotBefore = $cert.NotBefore
+            NotAfter = $cert.NotAfter
+            HasPrivateKey = $cert.HasPrivateKey
+            PackageDir = $packageDir
+            Zip = $zipPath
+            Files = @(
+              $crtPath,
+              $fullchainPath,
+              $keyPath,
+              $pfxPath,
+              $pfxPassPath,
+              $rootPemPath
+            ) -join '; '
+          }
+      no_log: "{{ cert_pfx_password | length > 0 }}"
+      when: not cert_dry_run | bool
