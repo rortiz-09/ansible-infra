@@ -1,0 +1,5 @@
+---
+# Ejecuta hardening seguro solo sobre servidores Sangoma 7.
+- import_playbook: ../hardening_apply_safe.yml
+  vars:
+    target_hosts: "linux_sangoma_7"
