@@ -1,0 +1,5 @@
+---
+# Ejecuta hardening seguro solo sobre servidores Rocky Linux 8.
+- import_playbook: ../hardening_apply_safe.yml
+  vars:
+    target_hosts: "linux_rocky_8_7"
