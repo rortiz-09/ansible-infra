@@ -26,12 +26,20 @@ Capacidades listas:
 - Validaciones basicas de Zabbix agent.
 - Inventario dinamico planeado desde NetBox.
 
-Brechas encontradas en el Core:
+Estado despues de la habilitacion inicial:
 
-- `aws` CLI no esta instalado.
+- `aws` CLI instalado para el usuario operativo del Core.
+- Librerias Python instaladas: `boto3`, `botocore`, `pynetbox`, `pyVmomi`, `zabbix_utils`.
+- Colecciones instaladas en el proyecto: `amazon.aws`, `community.aws`, `community.vmware`, `netbox.netbox`, `community.zabbix`, `community.general`, `community.crypto`, `ansible.netcommon`, `ansible.utils`, `ansible.posix`, `ansible.windows`.
+- Directorios de reportes creados en `/ansible/reports`.
+- Sintaxis validada para discovery AWS, discovery vCenter, reporte de drift y baseline Windows.
+- Baseline Windows probado contra `xtrimad_01` y reporte generado.
+- Reporte de drift probado sin discovery previo y reporte generado.
+
+Brechas pendientes:
+
 - No hay credenciales AWS configuradas visibles para el usuario operativo.
-- Faltan librerias Python para cloud/discovery: `boto3`, `botocore`, `pynetbox`, `pyVmomi`, `zabbix_utils`.
-- Faltan colecciones Ansible instaladas en el Core para cloud/vCenter/NetBox/Zabbix.
+- No hay variables vCenter configuradas visibles para discovery: `VCENTER_HOSTNAME`, `VCENTER_USERNAME`, `VCENTER_PASSWORD`.
 - El proyecto en `/ansible/projects/ansible-infra` no esta como checkout Git completo; se comporta como copia operativa.
 - El `ansible.cfg` del Core usa `stdout_callback = yaml`, pero en algunas ejecuciones se requiere forzar `ANSIBLE_STDOUT_CALLBACK=default`.
 
@@ -177,13 +185,13 @@ Convenciones:
 
 ## Primeros 10 entregables sugeridos
 
-1. Instalar colecciones y librerias cloud en Ansible Core.
-2. Crear inventario dinamico NetBox estable para Linux y Windows.
-3. Crear `baseline_audit.yml` para Linux.
-4. Crear `baseline_audit.yml` para Windows.
-5. Crear reporte de snapshots vCenter.
-6. Crear discovery AWS de solo lectura.
+1. Configurar credenciales AWS seguras en el Core.
+2. Configurar credenciales vCenter seguras en el Core.
+3. Crear inventario dinamico NetBox estable para Linux y Windows.
+4. Ejecutar discovery AWS de solo lectura.
+5. Ejecutar discovery vCenter de solo lectura.
+6. Crear reporte de snapshots vCenter.
 7. Crear validacion de tags obligatorios en AWS y vCenter.
-8. Crear reporte de drift NetBox contra vCenter/AWS.
+8. Evolucionar reporte de drift NetBox contra vCenter/AWS.
 9. Crear pipeline manual para ejecutar playbooks con aprobacion.
-10. Crear carpeta `/ansible/reports` con retencion y formato estandar.
+10. Definir retencion automatica de `/ansible/reports`.

@@ -1,0 +1,50 @@
+---
+- name: Prepare Ansible Core control node dependencies
+  hosts: "{{ target_hosts | default('localhost') }}"
+  connection: local
+  gather_facts: true
+  become: false
+
+  vars:
+    control_node_collection_path: "{{ playbook_dir }}/../../collections"
+    control_node_python_packages:
+      - awscli
+      - boto3
+      - botocore
+      - pynetbox
+      - pyvmomi
+      - zabbix-utils
+
+  tasks:
+    - name: Show control node target
+      ansible.builtin.debug:
+        msg:
+          - "Control node: {{ inventory_hostname }}"
+          - "Python: {{ ansible_playbook_python }}"
+          - "Collections path: {{ control_node_collection_path }}"
+
+    - name: Install required Python packages for discovery
+      ansible.builtin.pip:
+        name: "{{ control_node_python_packages }}"
+        executable: pip3
+        extra_args: --user --upgrade
+
+    - name: Install Ansible collections for platform automation
+      ansible.builtin.command:
+        cmd: "ansible-galaxy collection install -r requirements.yml -p {{ control_node_collection_path }}"
+        chdir: "{{ playbook_dir }}/../.."
+      changed_when: "'Installing' in control_node_collections.stdout or 'Downloading' in control_node_collections.stdout"
+      register: control_node_collections
+
+    - name: Validate AWS CLI availability
+      ansible.builtin.command:
+        cmd: "{{ ansible_env.HOME }}/.local/bin/aws --version"
+      register: control_node_aws_cli
+      changed_when: false
+      failed_when: false
+
+    - name: Show dependency result
+      ansible.builtin.debug:
+        msg:
+          - "AWS CLI: {{ control_node_aws_cli.stdout | default(control_node_aws_cli.stderr) }}"
+          - "Collections install rc: {{ control_node_collections.rc }}"

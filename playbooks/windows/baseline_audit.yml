@@ -1,0 +1,74 @@
+---
+- name: Audit Windows baseline
+  hosts: "{{ target_hosts | default('windows') }}"
+  gather_facts: false
+  serial: "{{ windows_baseline_serial | default(20) }}"
+
+  vars:
+    windows_baseline_report_root: "{{ lookup('env', 'ANSIBLE_REPORT_ROOT') | default('/ansible/reports', true) }}"
+    windows_baseline_report_dir: "{{ lookup('env', 'WINDOWS_REPORT_DIR') | default(windows_baseline_report_root ~ '/windows', true) }}"
+
+  tasks:
+    - name: Collect Windows baseline data
+      ansible.windows.win_shell:
+        cmd: |
+          $ErrorActionPreference = 'Stop'
+          $cs = Get-CimInstance Win32_ComputerSystem
+          $os = Get-CimInstance Win32_OperatingSystem
+          $bios = Get-CimInstance Win32_BIOS
+          $disks = Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" |
+            Select-Object DeviceID,
+              @{Name='SizeGB';Expression={[math]::Round($_.Size / 1GB, 2)}},
+              @{Name='FreeGB';Expression={[math]::Round($_.FreeSpace / 1GB, 2)}},
+              @{Name='FreePct';Expression={if ($_.Size) {[math]::Round(($_.FreeSpace / $_.Size) * 100, 2)} else {$null}}}
+          $services = Get-Service |
+            Where-Object { $_.Status -ne 'Running' -and $_.StartType -eq 'Automatic' } |
+            Select-Object -First 30 Name,DisplayName,Status,StartType
+          $hotfixes = Get-HotFix | Sort-Object InstalledOn -Descending | Select-Object -First 10 HotFixID,InstalledOn,Description
+          $pendingReboot = $false
+          $pendingPaths = @(
+            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending',
+            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired'
+          )
+          foreach ($path in $pendingPaths) {
+            if (Test-Path $path) { $pendingReboot = $true }
+          }
+
+          [pscustomobject]@{
+            Hostname = $env:COMPUTERNAME
+            Domain = $cs.Domain
+            DomainRole = $cs.DomainRole
+            Manufacturer = $cs.Manufacturer
+            Model = $cs.Model
+            SerialNumber = $bios.SerialNumber
+            OS = $os.Caption
+            Version = $os.Version
+            BuildNumber = $os.BuildNumber
+            LastBoot = $os.LastBootUpTime.ToString('yyyy-MM-dd HH:mm:ss')
+            PendingReboot = $pendingReboot
+            MemoryGB = [math]::Round($cs.TotalPhysicalMemory / 1GB, 2)
+            Disks = $disks
+            StoppedAutomaticServices = $services
+            RecentHotfixes = $hotfixes
+          } | ConvertTo-Json -Depth 5 -Compress
+      register: windows_baseline_raw
+      changed_when: false
+
+    - name: Show Windows baseline summary
+      ansible.builtin.debug:
+        msg: "{{ windows_baseline_raw.stdout | from_json }}"
+
+    - name: Ensure local Windows report directory exists
+      ansible.builtin.file:
+        path: "{{ windows_baseline_report_dir }}"
+        state: directory
+        mode: "0750"
+      delegate_to: localhost
+      run_once: true
+
+    - name: Write Windows baseline report per host
+      ansible.builtin.copy:
+        dest: "{{ windows_baseline_report_dir }}/{{ inventory_hostname }}.json"
+        mode: "0640"
+        content: "{{ windows_baseline_raw.stdout | from_json | to_nice_json }}"
+      delegate_to: localhost

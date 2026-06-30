@@ -1,0 +1,78 @@
+---
+- name: Build inventory drift report from discovery files
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    drift_report_root: "{{ lookup('env', 'ANSIBLE_REPORT_ROOT') | default('/ansible/reports', true) }}"
+    drift_report_dir: "{{ lookup('env', 'DRIFT_REPORT_DIR') | default(drift_report_root ~ '/drift', true) }}"
+    drift_aws_report: "{{ lookup('env', 'AWS_DISCOVERY_REPORT') | default(drift_report_root ~ '/aws/aws-discovery.json', true) }}"
+    drift_vcenter_report: "{{ lookup('env', 'VCENTER_DISCOVERY_REPORT') | default(drift_report_root ~ '/vmware/vcenter-discovery.json', true) }}"
+
+  tasks:
+    - name: Check discovery report files
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ drift_aws_report }}"
+        - "{{ drift_vcenter_report }}"
+      register: drift_report_files
+
+    - name: Read AWS discovery report if present
+      ansible.builtin.slurp:
+        path: "{{ drift_aws_report }}"
+      register: drift_aws_raw
+      when: drift_report_files.results[0].stat.exists
+
+    - name: Read vCenter discovery report if present
+      ansible.builtin.slurp:
+        path: "{{ drift_vcenter_report }}"
+      register: drift_vcenter_raw
+      when: drift_report_files.results[1].stat.exists
+
+    - name: Build drift input facts
+      ansible.builtin.set_fact:
+        drift_aws_data: "{{ (drift_aws_raw.content | b64decode | from_json) if drift_report_files.results[0].stat.exists else {} }}"
+        drift_vcenter_data: "{{ (drift_vcenter_raw.content | b64decode | from_json) if drift_report_files.results[1].stat.exists else {} }}"
+
+    - name: Ensure drift report directory exists
+      ansible.builtin.file:
+        path: "{{ drift_report_dir }}"
+        state: directory
+        mode: "0750"
+
+    - name: Write drift summary report
+      ansible.builtin.copy:
+        dest: "{{ drift_report_dir }}/inventory-drift.md"
+        mode: "0640"
+        content: |
+          # Inventory drift report
+
+          This report is generated from discovery files. It does not modify NetBox.
+
+          ## Sources
+
+          - AWS report present: {{ drift_report_files.results[0].stat.exists }}
+          - vCenter report present: {{ drift_report_files.results[1].stat.exists }}
+
+          ## AWS
+
+          - Regions discovered: {{ drift_aws_data.regions | default([]) | length }}
+          - EC2 region result sets: {{ drift_aws_data.ec2 | default([]) | length }}
+          - VPC region result sets: {{ drift_aws_data.vpcs | default([]) | length }}
+          - RDS region result sets: {{ drift_aws_data.rds | default([]) | length }}
+
+          ## vCenter
+
+          - Datacenters discovered: {{ drift_vcenter_data.datacenters.datacenter_info | default([]) | length }}
+          - VMs discovered: {{ drift_vcenter_data.virtual_machines.virtual_machines | default([]) | length }}
+
+          ## Next reconciliation step
+
+          Compare these results against NetBox using `NETBOX_URL` and `NETBOX_TOKEN`.
+          Keep create/update/delete actions in separate playbooks with approval.
+
+    - name: Show drift report path
+      ansible.builtin.debug:
+        msg: "Drift report: {{ drift_report_dir }}/inventory-drift.md"

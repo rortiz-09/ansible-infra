@@ -1,0 +1,71 @@
+---
+- name: Discover vCenter inventory
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    vcenter_hostname: "{{ lookup('env', 'VCENTER_HOSTNAME') }}"
+    vcenter_username: "{{ lookup('env', 'VCENTER_USERNAME') }}"
+    vcenter_password: "{{ lookup('env', 'VCENTER_PASSWORD') }}"
+    vcenter_validate_certs: "{{ lookup('env', 'VCENTER_VALIDATE_CERTS') | default('false', true) | bool }}"
+    vcenter_report_root: "{{ lookup('env', 'ANSIBLE_REPORT_ROOT') | default('/ansible/reports', true) }}"
+    vcenter_report_dir: "{{ lookup('env', 'VCENTER_REPORT_DIR') | default(vcenter_report_root ~ '/vmware', true) }}"
+
+  tasks:
+    - name: Validate vCenter connection variables
+      ansible.builtin.assert:
+        that:
+          - vcenter_hostname | length > 0
+          - vcenter_username | length > 0
+          - vcenter_password | length > 0
+        fail_msg: "Define VCENTER_HOSTNAME, VCENTER_USERNAME and VCENTER_PASSWORD outside Git."
+
+    - name: Gather vCenter datacenter info
+      community.vmware.vmware_datacenter_info:
+        hostname: "{{ vcenter_hostname }}"
+        username: "{{ vcenter_username }}"
+        password: "{{ vcenter_password }}"
+        validate_certs: "{{ vcenter_validate_certs }}"
+      register: vcenter_datacenters
+
+    - name: Gather vCenter cluster info
+      community.vmware.vmware_cluster_info:
+        hostname: "{{ vcenter_hostname }}"
+        username: "{{ vcenter_username }}"
+        password: "{{ vcenter_password }}"
+        validate_certs: "{{ vcenter_validate_certs }}"
+      register: vcenter_clusters
+
+    - name: Gather vCenter VM info
+      community.vmware.vmware_vm_info:
+        hostname: "{{ vcenter_hostname }}"
+        username: "{{ vcenter_username }}"
+        password: "{{ vcenter_password }}"
+        validate_certs: "{{ vcenter_validate_certs }}"
+        show_tag: true
+      register: vcenter_vms
+
+    - name: Ensure vCenter report directory exists
+      ansible.builtin.file:
+        path: "{{ vcenter_report_dir }}"
+        state: directory
+        mode: "0750"
+
+    - name: Write vCenter discovery report
+      ansible.builtin.copy:
+        dest: "{{ vcenter_report_dir }}/vcenter-discovery.json"
+        mode: "0640"
+        content: |
+          {
+            "datacenters": {{ vcenter_datacenters | to_json }},
+            "clusters": {{ vcenter_clusters | to_json }},
+            "virtual_machines": {{ vcenter_vms | to_json }}
+          }
+
+    - name: Show vCenter discovery summary
+      ansible.builtin.debug:
+        msg:
+          - "Datacenters: {{ vcenter_datacenters.datacenter_info | default([]) | length }}"
+          - "VMs: {{ vcenter_vms.virtual_machines | default([]) | length }}"
+          - "Report: {{ vcenter_report_dir }}/vcenter-discovery.json"

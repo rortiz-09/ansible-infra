@@ -1,0 +1,100 @@
+---
+- name: Discover AWS inventory with AWS CLI
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    aws_cli_path: "{{ lookup('env', 'AWS_CLI_PATH') | default((lookup('env', 'HOME') ~ '/.local/bin/aws'), true) }}"
+    aws_discovery_regions: []
+    aws_report_root: "{{ lookup('env', 'ANSIBLE_REPORT_ROOT') | default('/ansible/reports', true) }}"
+    aws_discovery_output_dir: "{{ lookup('env', 'AWS_REPORT_DIR') | default(aws_report_root ~ '/aws', true) }}"
+    aws_discovery_profile_arg: "{{ ('--profile ' ~ aws_profile) if aws_profile is defined and aws_profile | length > 0 else '' }}"
+
+  tasks:
+    - name: Validate AWS CLI is installed
+      ansible.builtin.command:
+        cmd: "{{ aws_cli_path }} --version"
+      register: aws_discovery_cli
+      changed_when: false
+
+    - name: Validate AWS identity
+      ansible.builtin.command:
+        cmd: "{{ aws_cli_path }} {{ aws_discovery_profile_arg }} sts get-caller-identity --output json"
+      register: aws_discovery_identity
+      changed_when: false
+
+    - name: Read AWS regions when none are provided
+      ansible.builtin.command:
+        cmd: "{{ aws_cli_path }} {{ aws_discovery_profile_arg }} ec2 describe-regions --query Regions[].RegionName --output text"
+      register: aws_discovery_regions_auto
+      changed_when: false
+      when: aws_discovery_regions | length == 0
+
+    - name: Set effective AWS regions
+      ansible.builtin.set_fact:
+        aws_discovery_regions_effective: >-
+          {{
+            aws_discovery_regions
+            if aws_discovery_regions | length > 0
+            else (aws_discovery_regions_auto.stdout.split() | list)
+          }}
+
+    - name: Ensure AWS report directory exists
+      ansible.builtin.file:
+        path: "{{ aws_discovery_output_dir }}"
+        state: directory
+        mode: "0750"
+
+    - name: Discover EC2 instances by region
+      ansible.builtin.command:
+        cmd: >-
+          {{ aws_cli_path }} {{ aws_discovery_profile_arg }} ec2 describe-instances
+          --region {{ item }}
+          --query 'Reservations[].Instances[].{
+          InstanceId:InstanceId,
+          Name:Tags[?Key==`Name`]|[0].Value,
+          State:State.Name,
+          PrivateIpAddress:PrivateIpAddress,
+          PublicIpAddress:PublicIpAddress,
+          InstanceType:InstanceType,
+          VpcId:VpcId,
+          SubnetId:SubnetId,
+          Platform:PlatformDetails,
+          Tags:Tags}'
+          --output json
+      loop: "{{ aws_discovery_regions_effective }}"
+      register: aws_discovery_ec2
+      changed_when: false
+
+    - name: Discover VPCs by region
+      ansible.builtin.command:
+        cmd: "{{ aws_cli_path }} {{ aws_discovery_profile_arg }} ec2 describe-vpcs --region {{ item }} --output json"
+      loop: "{{ aws_discovery_regions_effective }}"
+      register: aws_discovery_vpcs
+      changed_when: false
+
+    - name: Discover RDS instances by region
+      ansible.builtin.command:
+        cmd: "{{ aws_cli_path }} {{ aws_discovery_profile_arg }} rds describe-db-instances --region {{ item }} --output json"
+      loop: "{{ aws_discovery_regions_effective }}"
+      register: aws_discovery_rds
+      changed_when: false
+      failed_when: false
+
+    - name: Write AWS discovery report
+      ansible.builtin.copy:
+        dest: "{{ aws_discovery_output_dir }}/aws-discovery.json"
+        mode: "0640"
+        content: |
+          {
+            "identity": {{ aws_discovery_identity.stdout }},
+            "regions": {{ aws_discovery_regions_effective | to_json }},
+            "ec2": {{ aws_discovery_ec2.results | to_json }},
+            "vpcs": {{ aws_discovery_vpcs.results | to_json }},
+            "rds": {{ aws_discovery_rds.results | to_json }}
+          }
+
+    - name: Show AWS discovery report path
+      ansible.builtin.debug:
+        msg: "AWS discovery report: {{ aws_discovery_output_dir }}/aws-discovery.json"
