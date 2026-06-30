@@ -47,9 +47,12 @@ Este documento define los primeros runbooks/playbooks que conviene tener para el
 | Prioridad | Runbook | Objetivo | Estado recomendado |
 | --- | --- | --- | --- |
 | 16 | `playbooks/windows/bootstrap_winrm_https.yml` | Preparar WinRM HTTPS con certificados internos. | Existente |
-| 17 | `playbooks/windows/baseline_audit.yml` | Estado Windows: SO, parches, reinicio pendiente, servicios, disco. | Pendiente |
-| 18 | `playbooks/network/network_backup.yml` | Backup de configuracion de equipos de red soportados por collections. | Pendiente |
-| 19 | `playbooks/network/network_compliance.yml` | Validar SNMP, NTP, syslog, AAA y configuracion minima. | Pendiente |
+| 17 | `playbooks/windows/unlock_local_user.yml` | Desbloquear cuenta local Windows solicitando el usuario en runtime y registrar evidencia de intentos fallidos/bloqueo. | Creado |
+| 18 | `playbooks/windows/ensure_ansible_local_admin.yml` | Agregar `svc_ansible` o un grupo de dominio a administradores locales para operacion WinRM. | Creado |
+| 19 | `playbooks/soporte_usuarios/soporte_usuarios.yml` | Consola interactiva para desbloqueo AD y cambio de contrasena de usuarios. | Creado |
+| 20 | `playbooks/windows/baseline_audit.yml` | Estado Windows: SO, parches, reinicio pendiente, servicios, disco. | Pendiente |
+| 21 | `playbooks/network/network_backup.yml` | Backup de configuracion de equipos de red soportados por collections. | Pendiente |
+| 22 | `playbooks/network/network_compliance.yml` | Validar SNMP, NTP, syslog, AAA y configuracion minima. | Pendiente |
 
 ## Primer flujo operativo recomendado
 
@@ -77,6 +80,78 @@ ansible-playbook playbooks/linux/reboot_controlled.yml --limit linux_prod_gye -e
 
 ```bash
 ansible-playbook playbooks/linux/baseline_audit.yml --limit linux_prod_gye
+```
+
+## Flujo Windows - desbloqueo de usuario local
+
+El playbook solicita siempre el usuario a desbloquear, lo normaliza a minusculas y no acepta dominio en el valor ingresado.
+
+```bash
+ansible-playbook playbooks/windows/unlock_local_user.yml \
+  -e target_hosts=windows_winrm_http \
+  --limit xtr_srv_des_invicmigra
+```
+
+Para pasar el target por variable:
+
+```bash
+ansible-playbook playbooks/windows/unlock_local_user.yml -e target_hosts=windows_winrm_http --limit xtr_srv_des_invicmigra
+```
+
+La salida incluye:
+
+- Estado antes/despues de `IsAccountLocked`.
+- `LastLogon`, `PasswordLastSet` y grupos locales del usuario.
+- Hasta 20 eventos recientes `4625` y `4740` del Security Log para explicar origen de intentos fallidos o bloqueo.
+
+El permiso permanente de `svc_ansible` debe quedar preferiblemente por GPO agregando un grupo de dominio a `Administrators` y `Remote Management Users`. Para bootstrap puntual por Ansible existe:
+
+```bash
+ansible-playbook playbooks/windows/ensure_ansible_local_admin.yml --limit servidor_windows \
+  -e windows_ansible_admin_principal='svc_ansible@xtrim.com.ec'
+```
+
+Nota: en pruebas contra `192.168.77.98`, Windows no pudo traducir `GRUPOTVCABLE\svc_ansible`, pero si tradujo correctamente el UPN `svc_ansible@xtrim.com.ec`.
+El playbook resuelve los grupos locales por SID para soportar Windows en ingles o espanol y bloquea cambios en Domain Controllers salvo autorizacion explicita.
+
+Para Domain Controllers se usa un playbook separado, porque el grupo Builtin del dominio no se administra como grupo local de member server:
+
+```bash
+ansible-playbook playbooks/windows/ensure_ad_remoting_access.yml --limit ad_domain_controllers
+```
+
+Ese playbook garantiza/verifica `svc_ansible` en `Remote Management Users` por SID `S-1-5-32-580` y luego valida `win_ping` en cada DC.
+
+## Flujo soporte usuarios AD
+
+La consola principal para Mesa/Soporte esta en:
+
+```bash
+ansible-playbook playbooks/soporte_usuarios/soporte_usuarios.yml
+```
+
+Opciones:
+
+- `1` / `desbloquear`: pide usuario AD, revisa `LockedOut`, desbloquea solo si esta bloqueado e informa si no estaba bloqueado.
+- `2` / `cambiar_password`: pide usuario, modo de contrasena, si debe cambiar al siguiente inicio y si debe desbloquear si esta bloqueado.
+
+Contrasena automatica:
+
+```text
+Xtrim<anio>.<usuario>
+```
+
+Si no completa 14 caracteres, se agregan las letras necesarias de `Soporte`.
+
+Prueba real ejecutada desde `XTR-SRV-ANSI-CORE` contra `acolorado`:
+
+```text
+Password manual: valor temporal definido para prueba, no documentado en Git
+MustChangeAtNextLogon: true
+Bloqueo real generado con 5 intentos fallidos segun politica AD
+Desbloqueo con playbook: OK
+Segunda corrida de desbloqueo: informa que el usuario no se encuentra bloqueado
+Estado final: Enabled=true, LockedOut=false, badPwdCount=0, pwdLastSet=0
 ```
 
 ## Pendientes de madurez

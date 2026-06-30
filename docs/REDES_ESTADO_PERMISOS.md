@@ -575,3 +575,143 @@ El modelo recomendado es:
 
 Ya se instalo `pywinrm` en `XTR-SRV-ANSI-CORE`.
 La prueba con Passbolt mostro que la red por `5985` funciona para buena parte de los hosts, pero el bloqueo principal es autenticacion.
+
+## Desbloqueo local Windows - XTR-SRV-DES-INVICMIGRA / 192.168.77.98 - 2026-06-30
+
+Ticket relacionado: `#54358 Desbloqueo de usuario desa-admin para server 77.98`.
+
+Validacion realizada desde estacion administrativa hacia `XTR-SRV-ANSI-CORE` por Paramiko y desde el control node hacia `192.168.77.98` por WinRM `5985`.
+
+Hallazgos:
+
+- Host validado: `xtr-srv-des-invicmigra`.
+- IP: `192.168.77.98`.
+- La cuenta `desa-admin` no existe como cuenta de dominio en `GRUPOTVCABLE.COM`; `Get-ADUser -Identity desa-admin` no encontro objeto en `DC=grupotvcable,DC=com`.
+- `desa-admin` existe como cuenta local del servidor.
+- La cuenta local estaba activa (`Account active: Yes`).
+- Al momento de revisar, `IsAccountLocked` estaba en `false`; aun asi se ejecuto desbloqueo idempotente con ADSI (`IsAccountLocked = false`).
+- Ultimo logon registrado: `2026-06-30 08:51:03`.
+- Password last set: `2026-02-23 09:40:21`.
+- Grupos locales observados: `Administrators`, `Remote Desktop Users`, `docker-users`, `Users`.
+- `Get-LocalUser` estaba disponible, pero `Unlock-LocalUser` no estaba disponible en esa sesion remota; por compatibilidad se uso ADSI `WinNT://<host>/desa-admin,user`.
+- El servidor esta unido al dominio `grupotvcable.com`, pero el nombre real reportado por Windows es `XTR-SRV-DES-INV`.
+- La cuenta AD `svc_ansible` existe y esta habilitada. UPN observado: `svc_ansible@xtrim.com.ec`.
+- Para permisos locales, Windows no pudo traducir `GRUPOTVCABLE\svc_ansible`, pero si tradujo `svc_ansible@xtrim.com.ec`.
+- Se agrego `svc_ansible@xtrim.com.ec` a `Administrators` y `Remote Management Users` en `192.168.77.98` usando el playbook `playbooks/windows/ensure_ansible_local_admin.yml`.
+- Luego `svc_ansible@GRUPOTVCABLE.COM` valido WinRM Kerberos contra `xtr-srv-des-invicmigra.grupotvcable.com` con `win_ping`.
+
+Evidencia de causa:
+
+- La solicitud indicaba bloqueo por intentos incorrectos.
+- En la primera validacion puntual la cuenta ya no figuraba bloqueada, por lo que no se pudo probar que siguiera bloqueada en ese instante.
+- La prueba posterior del playbook con ventana de 168 horas encontro eventos del Security Log que explican el bloqueo por intentos incorrectos:
+  - `2026-06-29 17:41:13`, EventId `4740`, `TargetUserName=desa-admin`.
+  - Fallos `4625` con `Status=0xc000006d` y `SubStatus=0xc000006a` antes del bloqueo, equivalente a credenciales incorrectas/password incorrecto.
+  - Origenes observados: `GSPANCHANA-TI` (`192.168.4.20`), `DESKTOP-CI7NJF7` (`192.168.14.12`) y `HGUEVARA-TI` (`192.168.14.7`).
+  - Despues del bloqueo aparecieron fallos `4625` con `Status=0xc0000234`, equivalente a cuenta bloqueada.
+
+Comando operativo recomendado desde `XTR-SRV-ANSI-CORE`:
+
+```bash
+ansible-playbook playbooks/windows/unlock_local_user.yml \
+  -e target_hosts=windows_winrm_http \
+  --limit xtr_srv_des_invicmigra
+```
+
+Prueba realizada desde `XTR-SRV-ANSI-CORE` con el playbook:
+
+```text
+Usuario solicitado: DESA-ADMIN
+Usuario normalizado: desa-admin
+Hostname: XTR-SRV-DES-INV
+LockedOutBefore: false
+LockedOutAfter: false
+LastLogon: 2026-06-30 08:51:03
+PasswordLastSet: 2026-02-23 09:40:21
+Action: ADSI IsAccountLocked set to false
+```
+
+## Permisos locales de svc_ansible en Windows con relacion de confianza - 2026-06-30
+
+Se actualizo `playbooks/windows/ensure_ansible_local_admin.yml` para garantizar que `svc_ansible@xtrim.com.ec` quede en los grupos locales necesarios para operar por WinRM:
+
+- `S-1-5-32-544`: `Administrators` / `Administradores`.
+- `S-1-5-32-580`: `Remote Management Users` / `Usuarios de administracion remota`.
+
+El playbook resuelve los grupos por SID, no por nombre, para funcionar en Windows en ingles o espanol. Tambien valida `DomainRole` y no modifica Domain Controllers salvo que se pase explicitamente `windows_ansible_allow_domain_controllers=true`.
+
+Comando ejecutado desde `XTR-SRV-ANSI-CORE`:
+
+```bash
+sudo -n /ansible/bin/with-windows-kerberos env \
+  ANSIBLE_CONFIG=/ansible/projects/ansible-infra/ansible.cfg \
+  ANSIBLE_COLLECTIONS_PATH=/ansible/projects/ansible-infra/collections \
+  ANSIBLE_STDOUT_CALLBACK=default \
+  ansible-playbook \
+  -i /ansible/inventories/windows_static.ini \
+  /ansible/projects/ansible-infra/playbooks/windows/ensure_ansible_local_admin.yml \
+  -e target_hosts='windows:windows_winrm_http'
+```
+
+Hosts Windows con relacion de confianza activa validados:
+
+| Host Ansible | Host Windows | DomainRole | Resultado |
+|---|---|---:|---|
+| `xtrimad_cs` | `XTRIMAD-CS` | 3 | `svc_ansible@xtrim.com.ec` ya presente en `Administrators` y `Remote Management Users` |
+| `xtr_srv_des_invicmigra` | `XTR-SRV-DES-INV` | 3 | `svc_ansible@xtrim.com.ec` ya presente en `Administrators` y `Remote Management Users` |
+| `tvc_srv_arcotel` | `TVC-SRV-ARCOTEL` | 1 | `svc_ansible@xtrim.com.ec` ya presente en `Administradores` y `Usuarios de administracion remota` |
+
+Validacion posterior:
+
+```text
+ansible win_ping OK en xtrimad_cs, xtr_srv_des_invicmigra y tvc_srv_arcotel.
+ensure_ansible_local_admin.yml RC=0 sobre los tres hosts.
+```
+
+## Relacion de confianza Ansible Core hacia Domain Controllers - 2026-06-30
+
+Se creo `playbooks/windows/ensure_ad_remoting_access.yml` para administrar el acceso WinRM de `svc_ansible` en servidores AD/DC desde `XTR-SRV-ANSI-CORE`.
+
+Importante: en Domain Controllers no se manejan grupos locales normales como en un member server. Para remoting se valida el grupo Builtin del dominio con SID `S-1-5-32-580` (`Remote Management Users`) y se confirma conectividad WinRM desde el Core.
+
+Comando ejecutado desde `XTR-SRV-ANSI-CORE`:
+
+```bash
+sudo -n /ansible/bin/with-windows-kerberos env \
+  ANSIBLE_CONFIG=/ansible/projects/ansible-infra/ansible.cfg \
+  ANSIBLE_COLLECTIONS_PATH=/ansible/projects/ansible-infra/collections \
+  ANSIBLE_STDOUT_CALLBACK=default \
+  ansible-playbook \
+  -i /ansible/inventories/windows_static.ini \
+  /ansible/projects/ansible-infra/playbooks/windows/ensure_ad_remoting_access.yml \
+  --limit 'xtrimad_01:tvc_srvaduio1:tvc_srvaduio2:xtrimad_02'
+```
+
+Resultado:
+
+| IP | Host Ansible | Host Windows | Resultado |
+|---|---|---|---|
+| `192.168.59.235` | `xtrimad_01` | `XTRIMAD-01` | `win_ping` OK con `svc_ansible`; `Remote Management Users` ya presente |
+| `192.168.59.234` | `xtrimad_02` | `XTRIMAD-02` | `win_ping` OK con `svc_ansible`; `Remote Management Users` ya presente |
+| `192.168.21.42` | `tvc_srvaduio1` | `TVC-SRVADUIO1` | `win_ping` OK con `svc_ansible`; `Remote Management Users` ya presente |
+| `192.168.21.26` | `tvc_srvaduio2` | `TVC-SRV-ADUIO2` | `win_ping` OK con `svc_ansible`; `Remote Management Users` ya presente |
+
+Membresia de dominio validada:
+
+```text
+Principal: svc_ansible
+UPN: svc_ansible@xtrim.com.ec
+SID: S-1-5-21-869798867-1268677269-1536833037-50103
+Builtin group: Remote Management Users
+Builtin group SID: S-1-5-32-580
+Action: already_present
+```
+
+Play recap:
+
+```text
+tvc_srvaduio1  ok=3 changed=0 unreachable=0 failed=0
+tvc_srvaduio2  ok=3 changed=0 unreachable=0 failed=0
+xtrimad_01     ok=4 changed=0 unreachable=0 failed=0
+xtrimad_02     ok=3 changed=0 unreachable=0 failed=0
+```
