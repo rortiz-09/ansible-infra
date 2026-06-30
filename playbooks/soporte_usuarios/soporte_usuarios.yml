@@ -1,0 +1,165 @@
+---
+- name: Consola de soporte de usuarios AD
+  hosts: "{{ support_target | default('ad_domain_controllers') }}"
+  gather_facts: false
+  any_errors_fatal: false
+
+  vars:
+    support_valid_actions:
+      - "1"
+      - "2"
+      - "desbloquear"
+      - "desbloquear_usuario"
+      - "cambiar_password"
+      - "cambio_contrasena"
+      - "reset_password"
+    support_password_modes:
+      - "1"
+      - "2"
+      - "auto"
+      - "manual"
+    support_yes_values:
+      - "s"
+      - "si"
+      - "y"
+      - "yes"
+      - "true"
+      - "1"
+    support_reset_actions:
+      - "2"
+      - "cambiar_password"
+      - "cambio_contrasena"
+      - "reset_password"
+
+  tasks:
+    - name: Validate DC availability for support operation
+      ansible.windows.win_ping:
+      register: support_dc_ping
+      ignore_unreachable: true
+      ignore_errors: true
+
+    - name: Remove unavailable DC from this run
+      ansible.builtin.meta: end_host
+      when: support_dc_ping is failed or support_dc_ping is unreachable
+
+    - name: Show selected DC for this support operation
+      ansible.builtin.debug:
+        msg: "DC seleccionado automaticamente para esta operacion: {{ inventory_hostname }}"
+      run_once: true
+
+    - name: Ask support action
+      ansible.builtin.pause:
+        prompt: "Que desea hacer? 1=Desbloquear usuario AD, 2=Cambio de contrasena AD"
+      register: support_action_prompt
+      when: support_action is not defined
+      run_once: true
+
+    - name: Normalize support action
+      ansible.builtin.set_fact:
+        support_action_normalized: "{{ (support_action | default(support_action_prompt.user_input)) | trim | lower }}"
+      run_once: true
+
+    - name: Validate support action
+      ansible.builtin.assert:
+        that:
+          - support_action_normalized in support_valid_actions
+        fail_msg: "Opcion invalida. Usa 1/desbloquear o 2/cambiar_password."
+      run_once: true
+
+    - name: Ask AD username
+      ansible.builtin.pause:
+        prompt: "Ingrese el usuario AD"
+      register: support_user_prompt
+      when: support_user is not defined
+      run_once: true
+
+    - name: Normalize AD username
+      ansible.builtin.set_fact:
+        support_user_normalized: "{{ (support_user | default(support_user_prompt.user_input)) | trim | lower }}"
+      run_once: true
+
+    - name: Validate AD username
+      ansible.builtin.assert:
+        that:
+          - support_user_normalized | length > 0
+          - support_user_normalized is match('^[a-z0-9._-]+$')
+        fail_msg: "Escribe solo el SamAccountName, sin dominio. Caracteres permitidos: letras, numeros, punto, guion y guion bajo."
+      run_once: true
+
+    - name: Run AD unlock flow
+      ansible.builtin.include_tasks: tasks/desbloquear_usuario_ad.yml
+      when: support_action_normalized in ['1', 'desbloquear', 'desbloquear_usuario']
+      run_once: true
+
+    - name: Ask password mode
+      ansible.builtin.pause:
+        prompt: "Modo de contrasena? 1=Automatica Xtrim(anio).usuario, 2=Manual"
+      register: support_password_mode_prompt
+      when:
+        - support_action_normalized in support_reset_actions
+        - support_password_mode is not defined
+      run_once: true
+
+    - name: Normalize password mode
+      ansible.builtin.set_fact:
+        support_password_mode_normalized: "{{ (support_password_mode | default(support_password_mode_prompt.user_input)) | trim | lower }}"
+      when: support_action_normalized in support_reset_actions
+      run_once: true
+
+    - name: Validate password mode
+      ansible.builtin.assert:
+        that:
+          - support_password_mode_normalized in support_password_modes
+        fail_msg: "Modo invalido. Usa 1/auto o 2/manual."
+      when: support_action_normalized in support_reset_actions
+      run_once: true
+
+    - name: Ask manual password
+      ansible.builtin.pause:
+        prompt: "Ingrese la nueva contrasena"
+        echo: false
+      register: support_custom_password_prompt
+      when:
+        - support_action_normalized in support_reset_actions
+        - support_password_mode_normalized in ['2', 'manual']
+        - support_custom_password is not defined
+      run_once: true
+
+    - name: Store manual password
+      ansible.builtin.set_fact:
+        support_custom_password_effective: "{{ support_custom_password | default(support_custom_password_prompt.user_input) | default('') }}"
+      when:
+        - support_action_normalized in support_reset_actions
+        - support_password_mode_normalized in ['2', 'manual']
+      run_once: true
+      no_log: true
+
+    - name: Ask change password at next logon
+      ansible.builtin.pause:
+        prompt: "El usuario debe cambiar la contrasena en el siguiente inicio de sesion? s/n"
+      register: support_must_change_prompt
+      when:
+        - support_action_normalized in support_reset_actions
+        - support_must_change_password is not defined
+      run_once: true
+
+    - name: Ask unlock after password reset
+      ansible.builtin.pause:
+        prompt: "Desbloquear la cuenta si esta bloqueada? s/n"
+      register: support_unlock_after_reset_prompt
+      when:
+        - support_action_normalized in support_reset_actions
+        - support_unlock_after_reset is not defined
+      run_once: true
+
+    - name: Normalize reset options
+      ansible.builtin.set_fact:
+        support_must_change_password_bool: "{{ ((support_must_change_password | default(support_must_change_prompt.user_input)) | string | trim | lower) in support_yes_values }}"
+        support_unlock_after_reset_bool: "{{ ((support_unlock_after_reset | default(support_unlock_after_reset_prompt.user_input)) | string | trim | lower) in support_yes_values }}"
+      when: support_action_normalized in support_reset_actions
+      run_once: true
+
+    - name: Run AD password reset flow
+      ansible.builtin.include_tasks: tasks/cambiar_password_ad.yml
+      when: support_action_normalized in support_reset_actions
+      run_once: true

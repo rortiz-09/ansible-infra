@@ -1,0 +1,36 @@
+---
+- name: Unlock AD user if locked
+  ansible.windows.win_shell:
+    cmd: |
+      $ErrorActionPreference = 'Stop'
+      Import-Module ActiveDirectory
+
+      $Sam = {{ support_user_normalized | to_json }}
+      $user = Get-ADUser -Identity $Sam -Properties LockedOut,Enabled,lockoutTime,LastBadPasswordAttempt,badPwdCount,LastLogonDate
+      $wasLocked = [bool]$user.LockedOut
+      $action = 'not_locked'
+
+      if ($wasLocked) {
+        Unlock-ADAccount -Identity $user.SamAccountName
+        $action = 'unlocked'
+      }
+
+      $updated = Get-ADUser -Identity $Sam -Properties LockedOut,Enabled,lockoutTime,LastBadPasswordAttempt,badPwdCount,LastLogonDate
+
+      [pscustomobject]@{
+        SamAccountName = $updated.SamAccountName
+        Enabled = $updated.Enabled
+        WasLocked = $wasLocked
+        LockedOut = $updated.LockedOut
+        Action = $action
+        Message = if ($wasLocked) { "Usuario desbloqueado correctamente." } else { "El usuario no se encuentra bloqueado en AD." }
+        BadPwdCount = $updated.badPwdCount
+        LastBadPasswordAttempt = if ($updated.LastBadPasswordAttempt) { $updated.LastBadPasswordAttempt.ToString('yyyy-MM-dd HH:mm:ss') } else { $null }
+        LastLogonDate = if ($updated.LastLogonDate) { $updated.LastLogonDate.ToString('yyyy-MM-dd HH:mm:ss') } else { $null }
+      } | ConvertTo-Json -Compress
+  register: support_unlock_result
+  changed_when: "(support_unlock_result.stdout | from_json).Action == 'unlocked'"
+
+- name: Show unlock result
+  ansible.builtin.debug:
+    msg: "{{ support_unlock_result.stdout | from_json }}"
