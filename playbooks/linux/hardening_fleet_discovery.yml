@@ -1,6 +1,6 @@
----
+﻿---
 - name: Discover Linux distro and hardening family
-  hosts: "{{ target_hosts | default('trusted_linux') }}"
+  hosts: "{{ target_hosts | default('linux_hardening') }}"
   gather_facts: true
   become: false
   serial: "{{ linux_hardening_serial | default(40) }}"

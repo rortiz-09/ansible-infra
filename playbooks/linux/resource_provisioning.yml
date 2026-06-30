@@ -1,6 +1,6 @@
----
+﻿---
 - name: Audit and optionally grow Linux filesystem resources
-  hosts: "{{ target_hosts | default('trusted_linux') }}"
+  hosts: "{{ target_hosts | default('linux_hardening') }}"
   gather_facts: true
   become: true
   serial: "{{ linux_resource_serial | default(10) }}"
