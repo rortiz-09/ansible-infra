@@ -1,0 +1,5 @@
+---
+# Ejecuta hardening seguro solo sobre servidores Debian 12.
+- import_playbook: ../hardening_apply_safe.yml
+  vars:
+    target_hosts: "linux_debian_12"
