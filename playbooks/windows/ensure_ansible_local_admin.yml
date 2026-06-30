@@ -1,0 +1,98 @@
+---
+- name: Ensure Ansible service principal is local administrator on Windows hosts
+  hosts: "{{ target_hosts | default('windows') }}"
+  gather_facts: false
+  serial: "{{ admin_grant_serial | default(10) }}"
+
+  vars:
+    windows_ansible_admin_principal: "svc_ansible@xtrim.com.ec"
+    windows_ansible_admin_group_sids:
+      - "S-1-5-32-544"  # Administrators / Administradores
+      - "S-1-5-32-580"  # Remote Management Users / Usuarios de administracion remota
+    windows_ansible_allow_domain_controllers: false
+
+  tasks:
+    - name: Detect Windows domain role
+      ansible.windows.win_shell: |
+        $ErrorActionPreference = 'Stop'
+        $cs = Get-CimInstance Win32_ComputerSystem
+        [pscustomobject]@{
+          Hostname = $env:COMPUTERNAME
+          Domain = $cs.Domain
+          DomainRole = $cs.DomainRole
+          IsDomainController = ($cs.DomainRole -in 4,5)
+        } | ConvertTo-Json -Compress
+      register: windows_ansible_domain_role
+      changed_when: false
+
+    - name: Refuse domain controller changes unless explicitly allowed
+      ansible.builtin.assert:
+        that:
+          - not ((windows_ansible_domain_role.stdout | from_json).IsDomainController | bool) or (windows_ansible_allow_domain_controllers | bool)
+        fail_msg: "Este host es Domain Controller. No se modifica membresia administrativa ahi salvo con -e windows_ansible_allow_domain_controllers=true."
+
+    - name: Add Ansible principal to required local groups by well-known SID
+      ansible.windows.win_shell:
+        cmd: |
+          $ErrorActionPreference = 'Stop'
+
+          $Principal = {{ windows_ansible_admin_principal | to_json }}
+          $GroupSidsJson = '{{ windows_ansible_admin_group_sids | to_json }}'
+          $GroupSids = $GroupSidsJson | ConvertFrom-Json
+
+          $principalSid = ([System.Security.Principal.NTAccount]$Principal).Translate([System.Security.Principal.SecurityIdentifier]).Value
+          $result = @()
+          $changed = $false
+
+          foreach ($groupSidValue in $GroupSids) {
+            $groupSid = New-Object System.Security.Principal.SecurityIdentifier($groupSidValue)
+            $groupAccount = $groupSid.Translate([System.Security.Principal.NTAccount]).Value
+            $groupName = ($groupAccount -split '\\')[-1]
+
+            $members = @(Get-LocalGroupMember -Group $groupName -ErrorAction Stop)
+            $alreadyMember = $members | Where-Object {
+              try {
+                $_.SID.Value -eq $principalSid
+              } catch {
+                $_.Name -ieq $Principal
+              }
+            }
+
+            $action = 'already_present'
+            if (-not $alreadyMember) {
+              try {
+                Add-LocalGroupMember -Group $groupName -Member $Principal -ErrorAction Stop
+              } catch {
+                & net localgroup $groupName $Principal /add | Out-Null
+                if ($LASTEXITCODE -ne 0) {
+                  throw "No se pudo agregar $Principal a $groupName. ExitCode=$LASTEXITCODE. Detalle: $($_.Exception.Message)"
+                }
+              }
+              $changed = $true
+              $action = 'added'
+            }
+
+            $result += [pscustomobject]@{
+              GroupSid = $groupSidValue
+              GroupName = $groupName
+              Principal = $Principal
+              PrincipalSid = $principalSid
+              Action = $action
+            }
+          }
+
+          [pscustomobject]@{
+            Changed = $changed
+            Hostname = $env:COMPUTERNAME
+            Results = $result
+          } | ConvertTo-Json -Depth 4 -Compress
+      register: windows_ansible_admin_membership
+      changed_when: "windows_ansible_admin_membership.stdout | length > 0 and ((windows_ansible_admin_membership.stdout | from_json).Changed | bool)"
+
+    - name: Show configured principal
+      ansible.builtin.debug:
+        msg:
+          - "Host: {{ (windows_ansible_domain_role.stdout | from_json).Hostname }}"
+          - "DomainRole: {{ (windows_ansible_domain_role.stdout | from_json).DomainRole }}"
+          - "Principal: {{ windows_ansible_admin_principal }}"
+          - "Membership: {{ (windows_ansible_admin_membership.stdout | from_json).Results }}"

@@ -1,0 +1,138 @@
+---
+- name: Unlock a local Windows user and collect lockout evidence
+  hosts: "{{ target_hosts | default('windows') }}"
+  gather_facts: false
+  serial: "{{ unlock_serial | default(10) }}"
+
+  vars_prompt:
+    - name: unlock_local_username
+      prompt: "Usuario local a desbloquear"
+      private: false
+
+  vars:
+    unlock_event_lookback_hours: 72
+    unlock_local_username_normalized: "{{ unlock_local_username | trim | lower }}"
+
+  pre_tasks:
+    - name: Validate requested local username
+      ansible.builtin.assert:
+        that:
+          - unlock_local_username_normalized | length > 0
+          - unlock_local_username_normalized is match('^[a-z0-9._-]+$')
+        fail_msg: "Escribe solo el usuario local, sin dominio. Caracteres permitidos: letras, numeros, punto, guion y guion bajo."
+      run_once: true
+
+    - name: Show requested unlock operation
+      ansible.builtin.debug:
+        msg:
+          - "Usuario solicitado: {{ unlock_local_username }}"
+          - "Usuario normalizado: {{ unlock_local_username_normalized }}"
+          - "Lookback eventos Security: {{ unlock_event_lookback_hours }} horas"
+      run_once: true
+
+  tasks:
+    - name: Unlock local user and collect evidence
+      ansible.windows.win_shell: |
+        $ErrorActionPreference = 'Stop'
+
+        $UserName = {{ unlock_local_username_normalized | to_json }}
+        $LookbackHours = {{ unlock_event_lookback_hours | int }}
+        $Since = (Get-Date).AddHours(-1 * $LookbackHours)
+
+        $localUser = Get-LocalUser -Name $UserName -ErrorAction SilentlyContinue
+        if ($null -eq $localUser) {
+          throw "No existe el usuario local '$UserName' en $env:COMPUTERNAME."
+        }
+
+        $adsiPath = "WinNT://$env:COMPUTERNAME/$UserName,user"
+        $adsiBefore = [ADSI]$adsiPath
+        $lockedBefore = [bool]$adsiBefore.IsAccountLocked
+
+        $adsiBefore.IsAccountLocked = $false
+        $adsiBefore.SetInfo()
+
+        $adsiAfter = [ADSI]$adsiPath
+        $userAfter = Get-LocalUser -Name $UserName
+
+        $events = @()
+        try {
+          $events = Get-WinEvent -FilterHashtable @{
+              LogName = 'Security'
+              Id = 4625,4740
+              StartTime = $Since
+            } -ErrorAction Stop |
+            ForEach-Object {
+              $xml = [xml]$_.ToXml()
+              $data = @{}
+              foreach ($node in $xml.Event.EventData.Data) {
+                if ($node.Name) {
+                  $data[$node.Name] = $node.'#text'
+                }
+              }
+
+              $target = $data['TargetUserName']
+              if ($target -and ($target.ToLowerInvariant() -eq $UserName)) {
+                [pscustomobject]@{
+                  TimeCreated = $_.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss')
+                  EventId = $_.Id
+                  Provider = $_.ProviderName
+                  TargetUserName = $target
+                  WorkstationName = $data['WorkstationName']
+                  IpAddress = $data['IpAddress']
+                  LogonType = $data['LogonType']
+                  Status = $data['Status']
+                  SubStatus = $data['SubStatus']
+                  FailureReason = $data['FailureReason']
+                  ProcessName = $data['ProcessName']
+                }
+              }
+            } |
+            Sort-Object TimeCreated -Descending |
+            Select-Object -First 20
+        } catch {
+          $events = @([pscustomobject]@{
+              TimeCreated = $null
+              EventId = $null
+              Provider = 'Get-WinEvent'
+              TargetUserName = $UserName
+              WorkstationName = $null
+              IpAddress = $null
+              LogonType = $null
+              Status = $null
+              SubStatus = $null
+              FailureReason = "No se pudo consultar Security log: $($_.Exception.Message)"
+              ProcessName = $null
+            })
+        }
+
+        $groups = Get-LocalGroup |
+          ForEach-Object {
+            $groupName = $_.Name
+            $isMember = Get-LocalGroupMember -Group $groupName -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -match "\\$([regex]::Escape($UserName))$|^$([regex]::Escape($UserName))$" }
+            if ($isMember) {
+              $groupName
+            }
+          }
+
+        [pscustomobject]@{
+          Hostname = $env:COMPUTERNAME
+          UserName = $UserName
+          Exists = $true
+          Enabled = $userAfter.Enabled
+          LockedOutBefore = $lockedBefore
+          LockedOutAfter = [bool]$adsiAfter.IsAccountLocked
+          LastLogon = if ($userAfter.LastLogon) { $userAfter.LastLogon.ToString('yyyy-MM-dd HH:mm:ss') } else { $null }
+          PasswordLastSet = if ($userAfter.PasswordLastSet) { $userAfter.PasswordLastSet.ToString('yyyy-MM-dd HH:mm:ss') } else { $null }
+          UserMayChangePassword = $userAfter.UserMayChangePassword
+          PasswordRequired = $userAfter.PasswordRequired
+          LocalGroups = ($groups -join ', ')
+          Action = 'ADSI IsAccountLocked set to false'
+          EvidenceLookbackHours = $LookbackHours
+          RecentLockoutOrFailedLogonEvents = @($events)
+        } | ConvertTo-Json -Depth 6 -Compress
+      register: unlock_local_user_result
+
+    - name: Show unlock result
+      ansible.builtin.debug:
+        msg: "{{ unlock_local_user_result.stdout | from_json }}"

@@ -1,0 +1,86 @@
+---
+- name: Ensure svc_ansible has WinRM remoting access on AD domain controllers
+  hosts: "{{ target_hosts | default('ad_domain_controllers') }}"
+  gather_facts: false
+
+  vars:
+    ad_remoting_principal_sam: "svc_ansible"
+    ad_remoting_builtin_group_sid: "S-1-5-32-580"
+
+  tasks:
+    - name: Ensure AD principal is member of Builtin Remote Management Users
+      ansible.windows.win_shell:
+        cmd: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module ActiveDirectory
+
+          $PrincipalSam = {{ ad_remoting_principal_sam | to_json }}
+          $GroupSidValue = {{ ad_remoting_builtin_group_sid | to_json }}
+
+          $principal = Get-ADUser -Identity $PrincipalSam -Properties Enabled,UserPrincipalName,ObjectSID
+          if (-not $principal.Enabled) {
+            throw "La cuenta AD $PrincipalSam existe pero esta deshabilitada."
+          }
+
+          $domain = Get-ADDomain
+          $builtinDn = "CN=Builtin,$($domain.DistinguishedName)"
+          $group = Get-ADGroup -SearchBase $builtinDn -Filter * -Properties ObjectSID |
+            Where-Object { $_.ObjectSID.Value -eq $GroupSidValue } |
+            Select-Object -First 1
+
+          if (-not $group) {
+            throw "No se encontro grupo Builtin con SID $GroupSidValue en $builtinDn."
+          }
+
+          $members = Get-ADGroupMember -Identity $group.DistinguishedName -Recursive |
+            Where-Object { $_.objectSid.Value -eq $principal.ObjectSID.Value -or $_.SamAccountName -eq $principal.SamAccountName }
+
+          $action = 'already_present'
+          $changed = $false
+          if (-not $members) {
+            Add-ADGroupMember -Identity $group.DistinguishedName -Members $principal.DistinguishedName
+            $action = 'added'
+            $changed = $true
+          }
+
+          [pscustomobject]@{
+            Changed = $changed
+            DomainController = $env:COMPUTERNAME
+            Principal = $principal.SamAccountName
+            UserPrincipalName = $principal.UserPrincipalName
+            PrincipalSid = $principal.ObjectSID.Value
+            BuiltinGroupName = $group.Name
+            BuiltinGroupSid = $group.ObjectSID.Value
+            Action = $action
+          } | ConvertTo-Json -Compress
+      register: ad_remoting_membership
+      changed_when: "ad_remoting_membership.stdout | length > 0 and ((ad_remoting_membership.stdout | from_json).Changed | bool)"
+      run_once: true
+
+    - name: Validate WinRM with current svc_ansible session
+      ansible.windows.win_ping:
+
+    - name: Read connected identity and groups
+      ansible.windows.win_shell:
+        cmd: |
+          $ErrorActionPreference = 'Stop'
+          $groups = whoami /groups /fo csv | ConvertFrom-Csv
+          [pscustomobject]@{
+            Hostname = $env:COMPUTERNAME
+            Identity = (whoami)
+            RemoteManagementGroups = @(
+              $groups |
+                Where-Object {
+                  $_.'Group Name' -match 'Remote Management|administraci.n remota|WinRM|Administradores|Administrators'
+                } |
+                Select-Object -ExpandProperty 'Group Name'
+            )
+          } | ConvertTo-Json -Compress
+      register: ad_remoting_identity
+      changed_when: false
+
+    - name: Show AD remoting access result
+      ansible.builtin.debug:
+        msg:
+          - "Domain membership: {{ ad_remoting_membership.stdout | from_json }}"
+          - "Connected identity: {{ ad_remoting_identity.stdout | from_json }}"
