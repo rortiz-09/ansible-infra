@@ -1,0 +1,5 @@
+---
+# Ejecuta hardening seguro solo sobre servidores Oracle Linux.
+- import_playbook: ../hardening_apply_safe.yml
+  vars:
+    target_hosts: "linux_ol_7_9:linux_ol_8_10"
