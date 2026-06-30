@@ -1,0 +1,5 @@
+---
+# Ejecuta hardening seguro solo sobre servidores RHEL 9.
+- import_playbook: ../hardening_apply_safe.yml
+  vars:
+    target_hosts: "linux_rhel_9_2:linux_rhel_9_3:linux_rhel_9_4:linux_rhel_9_5:linux_rhel_9_6:linux_rhel_9_7:linux_rhel_9_8"
