@@ -10,6 +10,7 @@
       - enable
       - deshabilitar
       - disable
+    support_use_users_file: "{{ (support_users_file | default('') | string | trim | length) > 0 }}"
 
   tasks:
     - name: Validate DC availability for account state operation
@@ -59,7 +60,7 @@
             | map('lower')
             | list
           }}
-      when: support_users_file is defined
+      when: support_use_users_file
       run_once: true
 
     - name: Ask AD username
@@ -67,14 +68,14 @@
         prompt: "Ingrese el usuario AD"
       register: support_user_prompt
       when:
-        - support_users_file is not defined
+        - not support_use_users_file
         - support_user is not defined
       run_once: true
 
     - name: Normalize AD username
       ansible.builtin.set_fact:
         support_user_normalized: "{{ (support_user | default(support_user_prompt.user_input)) | trim | lower }}"
-      when: support_users_file is not defined
+      when: not support_use_users_file
       run_once: true
 
     - name: Validate AD username
@@ -83,7 +84,7 @@
           - support_user_normalized | length > 0
           - support_user_normalized is match('^[a-z0-9._-]+$')
         fail_msg: "Escribe solo el SamAccountName, sin dominio. Caracteres permitidos: letras, numeros, punto, guion y guion bajo."
-      when: support_users_file is not defined
+      when: not support_use_users_file
       run_once: true
 
     - name: Validate users from ini file
@@ -92,7 +93,7 @@
           - support_users_from_file | length > 0
           - support_users_from_file | select('match', '^[a-z0-9._-]+$') | list | length == support_users_from_file | length
         fail_msg: "El archivo ini debe tener un usuario por linea. Caracteres permitidos: letras, numeros, punto, guion y guion bajo."
-      when: support_users_file is defined
+      when: support_use_users_file
       run_once: true
 
     - name: Search AD user for interactive selection
@@ -123,7 +124,7 @@
 
           $result | ConvertTo-Json -Depth 4 -Compress
       register: support_user_search_result
-      when: support_users_file is not defined
+      when: not support_use_users_file
       run_once: true
       changed_when: false
 
@@ -132,7 +133,7 @@
         support_selected_users:
           - "{{ (support_user_search_result.stdout | from_json).ExactSamAccountName | lower }}"
       when:
-        - support_users_file is not defined
+        - not support_use_users_file
         - (support_user_search_result.stdout | from_json).ExactFound
       run_once: true
 
@@ -141,7 +142,7 @@
         msg: "{{ item.0 + 1 }}: {{ item.1.SamAccountName }} | {{ item.1.Name }} | {{ item.1.DisplayName | default('') }} | Enabled={{ item.1.Enabled }}"
       loop: "{{ range(0, ((support_user_search_result.stdout | from_json).Candidates | length)) | zip((support_user_search_result.stdout | from_json).Candidates) | list }}"
       when:
-        - support_users_file is not defined
+        - not support_use_users_file
         - not (support_user_search_result.stdout | from_json).ExactFound
         - (support_user_search_result.stdout | from_json).Candidates | length > 0
       run_once: true
@@ -151,7 +152,7 @@
         prompt: "El usuario no coincide exacto. Ingrese el numero del usuario correcto"
       register: support_user_selection_prompt
       when:
-        - support_users_file is not defined
+        - not support_use_users_file
         - not (support_user_search_result.stdout | from_json).ExactFound
         - (support_user_search_result.stdout | from_json).Candidates | length > 0
       run_once: true
@@ -161,7 +162,7 @@
         support_selected_users:
           - "{{ (support_user_search_result.stdout | from_json).Candidates[(support_user_selection_prompt.user_input | int) - 1].SamAccountName | lower }}"
       when:
-        - support_users_file is not defined
+        - not support_use_users_file
         - not (support_user_search_result.stdout | from_json).ExactFound
         - (support_user_search_result.stdout | from_json).Candidates | length > 0
       run_once: true
@@ -170,7 +171,7 @@
       ansible.builtin.fail:
         msg: "No se encontro el usuario '{{ support_user_normalized }}' ni coincidencias similares en AD."
       when:
-        - support_users_file is not defined
+        - not support_use_users_file
         - not (support_user_search_result.stdout | from_json).ExactFound
         - (support_user_search_result.stdout | from_json).Candidates | length == 0
       run_once: true
@@ -178,7 +179,7 @@
     - name: Store AD users from ini file
       ansible.builtin.set_fact:
         support_selected_users: "{{ support_users_from_file }}"
-      when: support_users_file is defined
+      when: support_use_users_file
       run_once: true
 
     - name: Apply AD account state
