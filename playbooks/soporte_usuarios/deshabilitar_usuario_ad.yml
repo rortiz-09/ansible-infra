@@ -1,11 +1,18 @@
 ---
-- name: Deshabilitar usuario AD desde soporte
+- name: Habilitar o deshabilitar usuarios AD desde soporte
   hosts: "{{ support_target | default('ad_domain_controllers') }}"
   gather_facts: false
   any_errors_fatal: false
 
+  vars:
+    support_account_actions:
+      - habilitar
+      - enable
+      - deshabilitar
+      - disable
+
   tasks:
-    - name: Validate DC availability for disable operation
+    - name: Validate DC availability for account state operation
       ansible.windows.win_ping:
       register: support_dc_ping
       ignore_unreachable: true
@@ -20,16 +27,54 @@
         msg: "DC seleccionado automaticamente para esta operacion: {{ inventory_hostname }}"
       run_once: true
 
-    - name: Ask AD username to disable
+    - name: Ask account action
       ansible.builtin.pause:
-        prompt: "Ingrese el usuario AD que sera deshabilitado"
+        prompt: "Que desea hacer? habilitar/deshabilitar"
+      register: support_account_action_prompt
+      when: support_account_action is not defined
+      run_once: true
+
+    - name: Normalize account action
+      ansible.builtin.set_fact:
+        support_account_action_normalized: "{{ (support_account_action | default(support_account_action_prompt.user_input)) | trim | lower }}"
+      run_once: true
+
+    - name: Validate account action
+      ansible.builtin.assert:
+        that:
+          - support_account_action_normalized in support_account_actions
+        fail_msg: "Accion invalida. Usa habilitar o deshabilitar."
+      run_once: true
+
+    - name: Read users from ini file
+      ansible.builtin.set_fact:
+        support_users_from_file: >-
+          {{
+            lookup('file', support_users_file).splitlines()
+            | map('trim')
+            | reject('equalto', '')
+            | reject('match', '^#')
+            | reject('match', '^;')
+            | reject('match', '^\\[')
+            | map('lower')
+            | list
+          }}
+      when: support_users_file is defined
+      run_once: true
+
+    - name: Ask AD username
+      ansible.builtin.pause:
+        prompt: "Ingrese el usuario AD"
       register: support_user_prompt
-      when: support_user is not defined
+      when:
+        - support_users_file is not defined
+        - support_user is not defined
       run_once: true
 
     - name: Normalize AD username
       ansible.builtin.set_fact:
         support_user_normalized: "{{ (support_user | default(support_user_prompt.user_input)) | trim | lower }}"
+      when: support_users_file is not defined
       run_once: true
 
     - name: Validate AD username
@@ -38,42 +83,178 @@
           - support_user_normalized | length > 0
           - support_user_normalized is match('^[a-z0-9._-]+$')
         fail_msg: "Escribe solo el SamAccountName, sin dominio. Caracteres permitidos: letras, numeros, punto, guion y guion bajo."
+      when: support_users_file is not defined
       run_once: true
 
-    - name: Disable AD user if enabled
+    - name: Validate users from ini file
+      ansible.builtin.assert:
+        that:
+          - support_users_from_file | length > 0
+          - support_users_from_file | select('match', '^[a-z0-9._-]+$') | list | length == support_users_from_file | length
+        fail_msg: "El archivo ini debe tener un usuario por linea. Caracteres permitidos: letras, numeros, punto, guion y guion bajo."
+      when: support_users_file is defined
+      run_once: true
+
+    - name: Search AD user for interactive selection
       ansible.windows.win_shell:
         cmd: |
           $ErrorActionPreference = 'Stop'
           Import-Module ActiveDirectory
 
-          $Sam = {{ support_user_normalized | to_json }}
-          $user = Get-ADUser -Identity $Sam -Properties Enabled,LockedOut,LastBadPasswordAttempt,badPwdCount,LastLogonDate
-          $wasEnabled = [bool]$user.Enabled
-          $action = 'already_disabled'
-
-          if ($wasEnabled) {
-            Disable-ADAccount -Identity $user.SamAccountName
-            $action = 'disabled'
+          $Query = {{ support_user_normalized | default('') | to_json }}
+          $result = [ordered]@{
+            Query = $Query
+            ExactFound = $false
+            ExactSamAccountName = $null
+            Candidates = @()
           }
 
-          $updated = Get-ADUser -Identity $Sam -Properties Enabled,LockedOut,LastBadPasswordAttempt,badPwdCount,LastLogonDate
+          try {
+            $exact = Get-ADUser -Identity $Query -Properties DisplayName,Enabled,UserPrincipalName
+            $result.ExactFound = $true
+            $result.ExactSamAccountName = $exact.SamAccountName
+          } catch {
+            $safe = $Query.Replace("'", "''")
+            $filter = "SamAccountName -like '*$safe*' -or Name -like '*$safe*' -or DisplayName -like '*$safe*'"
+            $result.Candidates = @(Get-ADUser -Filter $filter -Properties DisplayName,Enabled,UserPrincipalName |
+              Sort-Object SamAccountName |
+              Select-Object -First 10 SamAccountName,Name,DisplayName,Enabled,UserPrincipalName)
+          }
 
-          [pscustomobject]@{
-            SamAccountName = $updated.SamAccountName
-            WasEnabled = $wasEnabled
-            Enabled = $updated.Enabled
-            LockedOut = $updated.LockedOut
-            Action = $action
-            Message = if ($wasEnabled) { "Usuario deshabilitado correctamente." } else { "El usuario ya se encontraba deshabilitado en AD." }
-            BadPwdCount = $updated.badPwdCount
-            LastBadPasswordAttempt = if ($updated.LastBadPasswordAttempt) { $updated.LastBadPasswordAttempt.ToString('yyyy-MM-dd HH:mm:ss') } else { $null }
-            LastLogonDate = if ($updated.LastLogonDate) { $updated.LastLogonDate.ToString('yyyy-MM-dd HH:mm:ss') } else { $null }
-          } | ConvertTo-Json -Compress
-      register: support_disable_result
-      changed_when: "(support_disable_result.stdout | from_json).Action == 'disabled'"
+          $result | ConvertTo-Json -Depth 4 -Compress
+      register: support_user_search_result
+      when: support_users_file is not defined
+      run_once: true
+      changed_when: false
+
+    - name: Store exact AD user
+      ansible.builtin.set_fact:
+        support_selected_users:
+          - "{{ (support_user_search_result.stdout | from_json).ExactSamAccountName | lower }}"
+      when:
+        - support_users_file is not defined
+        - (support_user_search_result.stdout | from_json).ExactFound
       run_once: true
 
-    - name: Show disable result
+    - name: Show possible AD users
       ansible.builtin.debug:
-        msg: "{{ support_disable_result.stdout | from_json }}"
+        msg: "{{ item.0 + 1 }}: {{ item.1.SamAccountName }} | {{ item.1.Name }} | {{ item.1.DisplayName | default('') }} | Enabled={{ item.1.Enabled }}"
+      loop: "{{ range(0, ((support_user_search_result.stdout | from_json).Candidates | length)) | zip((support_user_search_result.stdout | from_json).Candidates) | list }}"
+      when:
+        - support_users_file is not defined
+        - not (support_user_search_result.stdout | from_json).ExactFound
+        - (support_user_search_result.stdout | from_json).Candidates | length > 0
+      run_once: true
+
+    - name: Ask selected AD user number
+      ansible.builtin.pause:
+        prompt: "El usuario no coincide exacto. Ingrese el numero del usuario correcto"
+      register: support_user_selection_prompt
+      when:
+        - support_users_file is not defined
+        - not (support_user_search_result.stdout | from_json).ExactFound
+        - (support_user_search_result.stdout | from_json).Candidates | length > 0
+      run_once: true
+
+    - name: Store selected AD user from candidates
+      ansible.builtin.set_fact:
+        support_selected_users:
+          - "{{ (support_user_search_result.stdout | from_json).Candidates[(support_user_selection_prompt.user_input | int) - 1].SamAccountName | lower }}"
+      when:
+        - support_users_file is not defined
+        - not (support_user_search_result.stdout | from_json).ExactFound
+        - (support_user_search_result.stdout | from_json).Candidates | length > 0
+      run_once: true
+
+    - name: Stop when AD user was not found
+      ansible.builtin.fail:
+        msg: "No se encontro el usuario '{{ support_user_normalized }}' ni coincidencias similares en AD."
+      when:
+        - support_users_file is not defined
+        - not (support_user_search_result.stdout | from_json).ExactFound
+        - (support_user_search_result.stdout | from_json).Candidates | length == 0
+      run_once: true
+
+    - name: Store AD users from ini file
+      ansible.builtin.set_fact:
+        support_selected_users: "{{ support_users_from_file }}"
+      when: support_users_file is defined
+      run_once: true
+
+    - name: Apply AD account state
+      ansible.windows.win_shell:
+        cmd: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module ActiveDirectory
+
+          $Action = {{ support_account_action_normalized | to_json }}
+          $Users = ConvertFrom-Json -InputObject '{{ support_selected_users | to_json }}'
+          $EnableAccount = $Action -in @('habilitar', 'enable')
+          $results = @()
+
+          foreach ($Sam in $Users) {
+            try {
+              $user = Get-ADUser -Identity $Sam -Properties Enabled,LockedOut,LastBadPasswordAttempt,badPwdCount,LastLogonDate
+              $wasEnabled = [bool]$user.Enabled
+              $operation = 'no_change'
+
+              if ($EnableAccount -and -not $wasEnabled) {
+                Enable-ADAccount -Identity $user.SamAccountName
+                $operation = 'enabled'
+              } elseif (-not $EnableAccount -and $wasEnabled) {
+                Disable-ADAccount -Identity $user.SamAccountName
+                $operation = 'disabled'
+              } elseif ($EnableAccount -and $wasEnabled) {
+                $operation = 'already_enabled'
+              } else {
+                $operation = 'already_disabled'
+              }
+
+              $updated = Get-ADUser -Identity $Sam -Properties Enabled,LockedOut,LastBadPasswordAttempt,badPwdCount,LastLogonDate
+
+              $results += [pscustomobject]@{
+                SamAccountName = $updated.SamAccountName
+                RequestedAction = if ($EnableAccount) { 'habilitar' } else { 'deshabilitar' }
+                WasEnabled = $wasEnabled
+                Enabled = $updated.Enabled
+                LockedOut = $updated.LockedOut
+                Operation = $operation
+                Message = switch ($operation) {
+                  'enabled' { 'Usuario habilitado correctamente.' }
+                  'disabled' { 'Usuario deshabilitado correctamente.' }
+                  'already_enabled' { 'El usuario ya se encontraba habilitado en AD.' }
+                  'already_disabled' { 'El usuario ya se encontraba deshabilitado en AD.' }
+                  default { 'Sin cambios.' }
+                }
+                BadPwdCount = $updated.badPwdCount
+                LastBadPasswordAttempt = if ($updated.LastBadPasswordAttempt) { $updated.LastBadPasswordAttempt.ToString('yyyy-MM-dd HH:mm:ss') } else { $null }
+                LastLogonDate = if ($updated.LastLogonDate) { $updated.LastLogonDate.ToString('yyyy-MM-dd HH:mm:ss') } else { $null }
+              }
+            } catch {
+              $safe = [string]$Sam
+              $filter = "SamAccountName -like '*$safe*' -or Name -like '*$safe*' -or DisplayName -like '*$safe*'"
+              $candidates = @(Get-ADUser -Filter $filter -Properties DisplayName,Enabled,UserPrincipalName |
+                Sort-Object SamAccountName |
+                Select-Object -First 5 SamAccountName,Name,DisplayName,Enabled,UserPrincipalName)
+
+              $results += [pscustomobject]@{
+                SamAccountName = $Sam
+                RequestedAction = if ($EnableAccount) { 'habilitar' } else { 'deshabilitar' }
+                Operation = 'not_found'
+                Message = 'No se encontro el usuario exacto en AD.'
+                Candidates = $candidates
+              }
+            }
+          }
+
+          $results | ConvertTo-Json -Depth 5 -Compress
+      register: support_account_state_result
+      changed_when: >
+        '"Operation":"enabled"' in support_account_state_result.stdout or
+        '"Operation":"disabled"' in support_account_state_result.stdout
+      run_once: true
+
+    - name: Show account state result
+      ansible.builtin.debug:
+        msg: "{{ support_account_state_result.stdout | from_json }}"
       run_once: true
