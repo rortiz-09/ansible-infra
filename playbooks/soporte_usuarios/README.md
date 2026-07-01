@@ -65,9 +65,11 @@ Xtrim<anio>.<usuario>
 
 Si no llega a 14 caracteres, se completa con las letras necesarias de `Soporte`.
 
-## Deshabilitar usuario AD
+## Habilitar o deshabilitar usuario AD
 
-Este playbook es independiente de la consola principal. Pide el usuario y lo deshabilita en Active Directory.
+Este playbook es independiente de la consola principal. Pide si se desea habilitar o deshabilitar, luego pide el usuario.
+
+Si el usuario no coincide exactamente, busca coincidencias parecidas en AD y permite seleccionar el usuario correcto por numero.
 
 Interactivo:
 
@@ -78,7 +80,42 @@ sudo -n /ansible/bin/with-windows-kerberos env ANSIBLE_STDOUT_CALLBACK=default a
 No interactivo:
 
 ```bash
-sudo -n /ansible/bin/with-windows-kerberos env ANSIBLE_STDOUT_CALLBACK=default ansible-playbook -i /ansible/inventories/windows_static.ini /ansible/projects/ansible-infra/playbooks/soporte_usuarios/deshabilitar_usuario_ad.yml -e support_user=usuario
+sudo -n /ansible/bin/with-windows-kerberos env ANSIBLE_STDOUT_CALLBACK=default ansible-playbook -i /ansible/inventories/windows_static.ini /ansible/projects/ansible-infra/playbooks/soporte_usuarios/deshabilitar_usuario_ad.yml -e support_account_action=deshabilitar -e support_user=usuario
 ```
 
-Si el usuario ya esta deshabilitado, el playbook lo indica y no marca cambios.
+Habilitar:
+
+```bash
+sudo -n /ansible/bin/with-windows-kerberos env ANSIBLE_STDOUT_CALLBACK=default ansible-playbook -i /ansible/inventories/windows_static.ini /ansible/projects/ansible-infra/playbooks/soporte_usuarios/deshabilitar_usuario_ad.yml -e support_account_action=habilitar -e support_user=usuario
+```
+
+Si el usuario ya esta en el estado solicitado, el playbook lo indica y no marca cambios.
+
+## Habilitar o deshabilitar usuarios en lote
+
+El archivo de ejemplo esta en:
+
+```text
+/ansible/projects/ansible-infra/playbooks/soporte_usuarios/usuarios_estado_ad.ini
+```
+
+Formato:
+
+```ini
+[usuarios]
+usuario1
+usuario2
+usuario3
+```
+
+Deshabilitar todos los usuarios del archivo:
+
+```bash
+sudo -n /ansible/bin/with-windows-kerberos env ANSIBLE_STDOUT_CALLBACK=default ansible-playbook -i /ansible/inventories/windows_static.ini /ansible/projects/ansible-infra/playbooks/soporte_usuarios/deshabilitar_usuario_ad.yml -e support_account_action=deshabilitar -e support_users_file=/ansible/projects/ansible-infra/playbooks/soporte_usuarios/usuarios_estado_ad.ini
+```
+
+Habilitar todos los usuarios del archivo:
+
+```bash
+sudo -n /ansible/bin/with-windows-kerberos env ANSIBLE_STDOUT_CALLBACK=default ansible-playbook -i /ansible/inventories/windows_static.ini /ansible/projects/ansible-infra/playbooks/soporte_usuarios/deshabilitar_usuario_ad.yml -e support_account_action=habilitar -e support_users_file=/ansible/projects/ansible-infra/playbooks/soporte_usuarios/usuarios_estado_ad.ini
+```
