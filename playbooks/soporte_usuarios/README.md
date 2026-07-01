@@ -64,3 +64,21 @@ Xtrim<anio>.<usuario>
 ```
 
 Si no llega a 14 caracteres, se completa con las letras necesarias de `Soporte`.
+
+## Deshabilitar usuario AD
+
+Este playbook es independiente de la consola principal. Pide el usuario y lo deshabilita en Active Directory.
+
+Interactivo:
+
+```bash
+sudo -n /ansible/bin/with-windows-kerberos env ANSIBLE_STDOUT_CALLBACK=default ansible-playbook -i /ansible/inventories/windows_static.ini /ansible/projects/ansible-infra/playbooks/soporte_usuarios/deshabilitar_usuario_ad.yml
+```
+
+No interactivo:
+
+```bash
+sudo -n /ansible/bin/with-windows-kerberos env ANSIBLE_STDOUT_CALLBACK=default ansible-playbook -i /ansible/inventories/windows_static.ini /ansible/projects/ansible-infra/playbooks/soporte_usuarios/deshabilitar_usuario_ad.yml -e support_user=usuario
+```
+
+Si el usuario ya esta deshabilitado, el playbook lo indica y no marca cambios.
