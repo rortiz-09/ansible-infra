@@ -1,0 +1,79 @@
+---
+- name: Deshabilitar usuario AD desde soporte
+  hosts: "{{ support_target | default('ad_domain_controllers') }}"
+  gather_facts: false
+  any_errors_fatal: false
+
+  tasks:
+    - name: Validate DC availability for disable operation
+      ansible.windows.win_ping:
+      register: support_dc_ping
+      ignore_unreachable: true
+      ignore_errors: true
+
+    - name: Remove unavailable DC from this run
+      ansible.builtin.meta: end_host
+      when: support_dc_ping is failed or support_dc_ping is unreachable
+
+    - name: Show selected DC for this support operation
+      ansible.builtin.debug:
+        msg: "DC seleccionado automaticamente para esta operacion: {{ inventory_hostname }}"
+      run_once: true
+
+    - name: Ask AD username to disable
+      ansible.builtin.pause:
+        prompt: "Ingrese el usuario AD que sera deshabilitado"
+      register: support_user_prompt
+      when: support_user is not defined
+      run_once: true
+
+    - name: Normalize AD username
+      ansible.builtin.set_fact:
+        support_user_normalized: "{{ (support_user | default(support_user_prompt.user_input)) | trim | lower }}"
+      run_once: true
+
+    - name: Validate AD username
+      ansible.builtin.assert:
+        that:
+          - support_user_normalized | length > 0
+          - support_user_normalized is match('^[a-z0-9._-]+$')
+        fail_msg: "Escribe solo el SamAccountName, sin dominio. Caracteres permitidos: letras, numeros, punto, guion y guion bajo."
+      run_once: true
+
+    - name: Disable AD user if enabled
+      ansible.windows.win_shell:
+        cmd: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module ActiveDirectory
+
+          $Sam = {{ support_user_normalized | to_json }}
+          $user = Get-ADUser -Identity $Sam -Properties Enabled,LockedOut,LastBadPasswordAttempt,badPwdCount,LastLogonDate
+          $wasEnabled = [bool]$user.Enabled
+          $action = 'already_disabled'
+
+          if ($wasEnabled) {
+            Disable-ADAccount -Identity $user.SamAccountName
+            $action = 'disabled'
+          }
+
+          $updated = Get-ADUser -Identity $Sam -Properties Enabled,LockedOut,LastBadPasswordAttempt,badPwdCount,LastLogonDate
+
+          [pscustomobject]@{
+            SamAccountName = $updated.SamAccountName
+            WasEnabled = $wasEnabled
+            Enabled = $updated.Enabled
+            LockedOut = $updated.LockedOut
+            Action = $action
+            Message = if ($wasEnabled) { "Usuario deshabilitado correctamente." } else { "El usuario ya se encontraba deshabilitado en AD." }
+            BadPwdCount = $updated.badPwdCount
+            LastBadPasswordAttempt = if ($updated.LastBadPasswordAttempt) { $updated.LastBadPasswordAttempt.ToString('yyyy-MM-dd HH:mm:ss') } else { $null }
+            LastLogonDate = if ($updated.LastLogonDate) { $updated.LastLogonDate.ToString('yyyy-MM-dd HH:mm:ss') } else { $null }
+          } | ConvertTo-Json -Compress
+      register: support_disable_result
+      changed_when: "(support_disable_result.stdout | from_json).Action == 'disabled'"
+      run_once: true
+
+    - name: Show disable result
+      ansible.builtin.debug:
+        msg: "{{ support_disable_result.stdout | from_json }}"
+      run_once: true
