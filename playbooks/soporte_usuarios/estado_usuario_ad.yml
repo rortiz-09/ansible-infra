@@ -1,0 +1,126 @@
+---
+- name: Menu de estado de usuarios AD
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    support_default_users_file: /ansible/projects/ansible-infra/playbooks/soporte_usuarios/usuarios_estado_ad.ini
+
+  tasks:
+    - name: Ask account action
+      ansible.builtin.pause:
+        prompt: "Que desea hacer? 1=Habilitar usuario, 2=Deshabilitar usuario"
+      register: support_menu_action_prompt
+      when: support_account_action is not defined
+
+    - name: Normalize account action
+      ansible.builtin.set_fact:
+        support_menu_action_input: "{{ (support_account_action | default(support_menu_action_prompt.user_input)) | trim | lower }}"
+
+    - name: Store account action
+      ansible.builtin.set_fact:
+        support_menu_account_action: >-
+          {{
+            'habilitar'
+            if support_menu_action_input in ['1', 'habilitar', 'enable']
+            else 'deshabilitar'
+            if support_menu_action_input in ['2', 'deshabilitar', 'disable']
+            else ''
+          }}
+
+    - name: Validate account action
+      ansible.builtin.assert:
+        that:
+          - support_menu_account_action in ['habilitar', 'deshabilitar']
+        fail_msg: "Accion invalida. Usa 1/habilitar o 2/deshabilitar."
+
+    - name: Ask operation scope
+      ansible.builtin.pause:
+        prompt: "Como desea ejecutar? 1=Usuario especifico, 2=Archivo ini"
+      register: support_menu_scope_prompt
+      when:
+        - support_user is not defined
+        - support_users_file is not defined
+
+    - name: Normalize operation scope
+      ansible.builtin.set_fact:
+        support_menu_scope_input: >-
+          {{
+            '2'
+            if support_users_file is defined
+            else '1'
+            if support_user is defined
+            else (support_menu_scope_prompt.user_input | trim | lower)
+          }}
+
+    - name: Store operation scope
+      ansible.builtin.set_fact:
+        support_menu_scope: >-
+          {{
+            'usuario'
+            if support_menu_scope_input in ['1', 'usuario', 'user']
+            else 'archivo'
+            if support_menu_scope_input in ['2', 'archivo', 'ini', 'file']
+            else ''
+          }}
+
+    - name: Validate operation scope
+      ansible.builtin.assert:
+        that:
+          - support_menu_scope in ['usuario', 'archivo']
+        fail_msg: "Alcance invalido. Usa 1/usuario o 2/archivo ini."
+
+    - name: Ask AD username
+      ansible.builtin.pause:
+        prompt: "Ingrese el usuario AD"
+      register: support_menu_user_prompt
+      when:
+        - support_menu_scope == 'usuario'
+        - support_user is not defined
+
+    - name: Ask ini file path
+      ansible.builtin.pause:
+        prompt: "Ingrese la ruta del archivo ini o presione Enter para usar {{ support_default_users_file }}"
+      register: support_menu_file_prompt
+      when:
+        - support_menu_scope == 'archivo'
+        - support_users_file is not defined
+
+    - name: Store selected input
+      ansible.builtin.set_fact:
+        support_menu_user: "{{ (support_user | default(support_menu_user_prompt.user_input) | default('')) | trim | lower }}"
+        support_menu_users_file: >-
+          {{
+            support_users_file
+            | default(support_menu_file_prompt.user_input | default(''))
+            | trim
+          }}
+
+    - name: Use default ini file when path is empty
+      ansible.builtin.set_fact:
+        support_menu_users_file: "{{ support_default_users_file }}"
+      when:
+        - support_menu_scope == 'archivo'
+        - support_menu_users_file | length == 0
+
+    - name: Validate single user input
+      ansible.builtin.assert:
+        that:
+          - support_menu_user | length > 0
+          - support_menu_user is match('^[a-z0-9._-]+$')
+        fail_msg: "Escribe solo el SamAccountName, sin dominio."
+      when: support_menu_scope == 'usuario'
+
+    - name: Show selected operation
+      ansible.builtin.debug:
+        msg:
+          Accion: "{{ support_menu_account_action }}"
+          Modo: "{{ support_menu_scope }}"
+          Usuario: "{{ support_menu_user if support_menu_scope == 'usuario' else 'no aplica' }}"
+          ArchivoIni: "{{ support_menu_users_file if support_menu_scope == 'archivo' else 'no aplica' }}"
+
+- import_playbook: deshabilitar_usuario_ad.yml
+  vars:
+    support_account_action: "{{ hostvars['localhost'].support_menu_account_action }}"
+    support_user: "{{ hostvars['localhost'].support_menu_user | default('') }}"
+    support_users_file: "{{ hostvars['localhost'].support_menu_users_file | default('') }}"
