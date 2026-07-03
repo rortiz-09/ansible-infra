@@ -57,13 +57,15 @@ sudo -n /ansible/bin/with-windows-kerberos env ANSIBLE_STDOUT_CALLBACK=default a
   -e support_unlock_after_reset=true
 ```
 
-La contrasena automatica usa:
+La contrasena automatica por defecto usa una clave compatible con politica de dominio:
 
 ```text
-Xtrim<anio>.<usuario>
+Xtrim<anio>.Soporte!
 ```
 
-Si no llega a 14 caracteres, se completa con las letras necesarias de `Soporte`.
+No incluye el SamAccountName porque AD puede rechazar contrasenas que contienen el nombre de usuario. Si se necesita forzar el formato anterior, usar `-e support_auto_password_include_username=true`, sabiendo que puede fallar por politica de complejidad.
+
+La contrasena manual debe tener al menos 14 caracteres antes de enviarse a AD.
 
 ## Habilitar o deshabilitar usuario AD
 
