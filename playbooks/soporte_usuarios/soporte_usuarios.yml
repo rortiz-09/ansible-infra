@@ -30,6 +30,7 @@
       - "cambiar_password"
       - "cambio_contrasena"
       - "reset_password"
+    support_use_users_file: "{{ (support_users_file | default('') | string | trim | length) > 0 }}"
 
   tasks:
     - name: Validate DC availability for support operation
@@ -70,12 +71,15 @@
       ansible.builtin.pause:
         prompt: "Ingrese el usuario AD"
       register: support_user_prompt
-      when: support_user is not defined
+      when:
+        - support_user is not defined
+        - not support_use_users_file
       run_once: true
 
     - name: Normalize AD username
       ansible.builtin.set_fact:
         support_user_normalized: "{{ (support_user | default(support_user_prompt.user_input)) | trim | lower }}"
+      when: not support_use_users_file
       run_once: true
 
     - name: Validate AD username
@@ -84,6 +88,15 @@
           - support_user_normalized | length > 0
           - support_user_normalized is match('^[a-z0-9._-]+$')
         fail_msg: "Escribe solo el SamAccountName, sin dominio. Caracteres permitidos: letras, numeros, punto, guion y guion bajo."
+      when: not support_use_users_file
+      run_once: true
+
+    - name: Validate users file is only for password reset
+      ansible.builtin.assert:
+        that:
+          - support_action_normalized in support_reset_actions
+        fail_msg: "El archivo ini por ahora se usa solo para cambio de contrasena en lote."
+      when: support_use_users_file
       run_once: true
 
     - name: Run AD unlock flow
@@ -110,7 +123,8 @@
       ansible.builtin.assert:
         that:
           - support_password_mode_normalized in support_password_modes
-        fail_msg: "Modo invalido. Usa 1/auto o 2/manual."
+          - not support_use_users_file or support_password_mode_normalized in ['1', 'auto']
+        fail_msg: "Modo invalido. Usa 1/auto o 2/manual. En lote con archivo ini solo se permite modo automatico."
       when: support_action_normalized in support_reset_actions
       run_once: true
 
