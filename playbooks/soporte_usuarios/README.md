@@ -60,12 +60,25 @@ sudo -n /ansible/bin/with-windows-kerberos env ANSIBLE_STDOUT_CALLBACK=default a
 La contrasena automatica por defecto usa una clave compatible con politica de dominio:
 
 ```text
-Xtrim<anio>.Soporte!
+Xtrim<anio>.<dos letras del usuario>.Soporte!
 ```
 
-No incluye el SamAccountName porque AD puede rechazar contrasenas que contienen el nombre de usuario. Si se necesita forzar el formato anterior, usar `-e support_auto_password_include_username=true`, sabiendo que puede fallar por politica de complejidad.
+No incluye el SamAccountName completo porque AD puede rechazar contrasenas que contienen el nombre de usuario. Si se necesita forzar el formato anterior, usar `-e support_auto_password_include_username=true`, sabiendo que puede fallar por politica de complejidad.
 
-La contrasena manual debe tener al menos 14 caracteres antes de enviarse a AD.
+La contrasena manual debe tener al menos 14 caracteres antes de enviarse a AD. Si es menor, el playbook muestra cuantos caracteres se ingresaron.
+
+Cambio de contrasena automatica en lote usando archivo ini:
+
+```bash
+sudo -n /ansible/bin/with-windows-kerberos env ANSIBLE_STDOUT_CALLBACK=default ansible-playbook -i /ansible/inventories/windows_static.ini /ansible/projects/ansible-infra/playbooks/soporte_usuarios/soporte_usuarios.yml \
+  -e support_action=cambiar_password \
+  -e support_password_mode=auto \
+  -e support_users_file=/ansible/projects/ansible-infra/playbooks/soporte_usuarios/usuarios_estado_ad.ini \
+  -e support_must_change_password=true \
+  -e support_unlock_after_reset=true
+```
+
+En lote, la salida muestra la lista de usuarios con su contrasena generada.
 
 ## Habilitar o deshabilitar usuario AD
 
